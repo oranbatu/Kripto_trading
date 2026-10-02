@@ -1,0 +1,15 @@
+# Consolidated dependency pins. Do not upgrade.
+# Merged from:
+#   C:\Users\oranb\Desktop\backtest_system\requirements.txt
+#     pyarrow==21.0.0
+#     tzdata==2026.4
+#   C:\Users\oranb\Desktop\candle_processing\requirements.txt
+#     pyarrow==21.0.0
+#     tzdata==2026.4
+#     notes: tested 2026-09-19, CPython 3.11.9
+#   candle_download had no requirements file (standard library only)
+# openpyxl==3.1.5 was already installed in the validated backtest_system venv
+# (PRIMARY range detector) and is recorded here without changing the version.
+pyarrow==21.0.0
+openpyxl==3.1.5
+tzdata==2026.4

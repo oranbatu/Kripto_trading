@@ -1,0 +1,10 @@
+[project]
+name = "backtest-system"
+version = "0.0.0"
+description = "Unified Binance USD-M perpetual candle project (ingestion, processing, data access, detectors)."
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ingestion*", "processing*", "data*", "detectors*"]

@@ -1,0 +1,66 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Market data and large datasets
+MarketData/
+market_data/
+data/raw/
+data/processed/
+data/derived/
+*.parquet
+*.feather
+*.arrow
+*.zip
+*.CHECKSUM
+
+# Generated Excel outputs
+*.xlsx
+*.xlsm
+*.xls
+
+# Runtime and temporary artifacts
+logs/
+reports/
+tmp/
+temp/
+*.log
+*.tmp
+*.part
+*.bak
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
