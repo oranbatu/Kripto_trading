@@ -16,7 +16,7 @@ DATASET = Path(r"C:\MarketData\derived\binance\futures\um\perpetual\30m\symbol=B
 
 DETECTOR_NAME = "BTCUSDT 30M Swing Special"
 DETECTOR_VERSION = "BTCUSDT_30M_SPECIAL_SWING_V1"
-CONFIGURATION_VERSION = "STANDARD_6_TO_9_DIRECTIONAL_REFERENCE_PAIR_NOT_PRE_CLOSE_COMPATIBILITY_V10"
+CONFIGURATION_VERSION = "STANDARD_6_TO_9_PEAK_DIP_BOUNDARY_1_00_MINIMAL_16_COLUMN_EXCEL_V12"
 FORMATION_CLASS = "STANDARD_30M_SPECIAL"
 TIMEFRAME = "30m"
 SYMBOL = "BTCUSDT"
@@ -40,7 +40,7 @@ MIN_TOTAL = 8
 MAX_TOTAL = 11
 FIRST_CLOSE_OFFSET = 7
 LAST_CLOSE_OFFSET = 10
-MIN_BOUNDARY = Decimal("0.90")
+MIN_BOUNDARY = Decimal("1.00")
 MAX_BOUNDARY = None
 REQUIRED_FRACTION = Decimal(1) / Decimal(3)
 
@@ -54,65 +54,22 @@ LONGER = "SUPPRESSED_LONGER_OVERLAPPING_STRUCTURE"
 REVISION_PATTERN = r"^BTCUSDT_30M_Special_Swings_rev(\d{2,})\.xlsx$"
 SHEETS = ("Special Swings", "Swing Highs", "Swing Lows", "Parameters")
 RESULT_COLUMNS = (
-    "Swing ID",
     "Swing Type",
-    "Formation Class",
-    "Interior Candle Count",
-    "Total Formation Candle Count",
     "Swing Open Open Time Turkey",
-    "Swing Open Close Time Turkey",
-    "Swing Open Direction",
-    "Swing Open Open Price",
-    "Swing Open High",
-    "Swing Open Low",
-    "Swing Open Close",
     "Swing Close Open Time Turkey",
-    "Swing Close Close Time Turkey",
-    "Swing Close Direction",
-    "Swing Close Open",
-    "Swing Close High",
-    "Swing Close Low",
-    "Swing Close Close",
-    "Earlier Swing Close Candidates Rejected By Reference Compatibility",
-    "Extremum Time Turkey",
-    "Extremum Type",
-    "Extremum Price",
-    "Interior Body Reference Status",
-    "Interior Body Reference Pair Type",
-    "Interior Body Reference Selection Rule",
-    "Eligible Interior Reference Pair Count",
     "Interior Body Reference Time Turkey",
-    "Interior Body Reference Candle Direction",
     "Interior Body Reference Open",
     "Interior Body Reference High",
     "Interior Body Reference Low",
     "Interior Body Reference Close",
-    "Interior Body Reference Price",
-    "Interior Body Reference Validation Time Turkey",
-    "Interior Body Reference Validation Direction",
-    "Interior Body Reference Validation Open",
-    "Interior Body Reference Validation High",
-    "Interior Body Reference Validation Low",
-    "Interior Body Reference Validation Close",
-    "Interior Body Reference Is Immediately Before Swing Close",
-    "Interior Body Reference Rows Before Swing Close",
-    "Reference To Swing Close Compatibility Status",
-    "Reference To Swing Close Margin",
-    "Reference To Swing Close Margin Percent",
-    "Reference To Validation Row Difference",
-    "Reference To Validation Close Change",
-    "Reference To Validation Close Change Percent",
-    "Interior Body Reference Bars After Swing Open",
-    "Interior Body Reference Position Fraction",
-    "Interior Body Reference Validation Position Fraction",
-    "Interior Body Reference Tie Count",
-    "Interior Body Reference Matches Extremum Candle",
-    "Validation Candle Matches Extremum Candle",
-    "Extremum To Body Reference Distance",
-    "Structure High",
-    "Structure Low",
-    "Open Boundary Percent",
-    "Close Boundary Percent",
+    "Peak 1 Time Turkey",
+    "Peak 1 High",
+    "Peak 2 Time Turkey",
+    "Peak 2 High",
+    "Dip 1 Time Turkey",
+    "Dip 1 Low",
+    "Dip 2 Time Turkey",
+    "Dip 2 Low",
 )
 
 USER_PARAMETERS = (
@@ -149,7 +106,7 @@ USER_PARAMETERS = (
     ("Wick-Only Confirmation", "Not Allowed"),
     ("Full Return to Swing Open Open Required", "No"),
     ("First Eligible Directional Penetration Binding", "Yes, After Reference Compatibility"),
-    ("Minimum Boundary Percent", "0.90%"),
+    ("Minimum Boundary Percent", "1.00%"),
     ("Maximum Boundary Percent", "None — No Upper Limit"),
     ("Both Minimum Boundaries Required", "Yes"),
     ("Interior Body Reference Enabled", "Yes"),
@@ -171,6 +128,20 @@ USER_PARAMETERS = (
     ("Swing Low Validation Direction", "Bearish"),
     ("Swing Low Reference Selection", "Highest Bullish Close With Immediate Bearish Interior Successor"),
     ("Swing Low Reference-To-Close Rule", "Reference Close <= Swing Close Close"),
+    ("Swing Open Eligible As Reference", "No"),
+    ("Swing Close Eligible As Reference", "No"),
+    ("Swing High Peak 1 Segment", "Swing Open Through Interior Body Reference, Inclusive"),
+    ("Swing High Peak 1 Selection", "Maximum Exact High"),
+    ("Swing High Peak 2 Segment", "Bullish Validation Candle Through Swing Close, Inclusive"),
+    ("Swing High Peak 2 Selection", "Maximum Exact High"),
+    ("Swing Low Dip 1 Segment", "Swing Open Through Interior Body Reference, Inclusive"),
+    ("Swing Low Dip 1 Selection", "Minimum Exact Low"),
+    ("Swing Low Dip 2 Segment", "Bearish Validation Candle Through Swing Close, Inclusive"),
+    ("Swing Low Dip 2 Selection", "Minimum Exact Low"),
+    ("Peak/Dip Tie Rule", "Last Chronological Exact Price Match"),
+    ("Peak/Dip Fields Are Hard Filters", "No"),
+    ("Peak/Dip Used For Boundary Calculation", "No"),
+    ("Peak/Dip Used For Primary Selection", "No"),
     ("Reference OHLC Exported", "Open, High, Low, Close"),
     ("Exact Equality Passes", "Yes"),
     ("Compatibility Failure Binds", "No"),
@@ -197,6 +168,10 @@ USER_PARAMETERS = (
     ("Primary Rule", "Minimum Valid Candle Count Wins"),
     ("Nested Structures Displayed", "No"),
     ("Derived Structures Displayed", "No"),
+    ("Result Worksheet Column Count", "16"),
+    ("Result Worksheet Columns", "Exact Minimal 16-Column Contract"),
+    ("Hidden Result Columns", "None"),
+    ("Extra Result Columns", "None"),
     ("Display Timezone", "Europe/Istanbul"),
     ("Detector Version", DETECTOR_VERSION),
     ("Configuration Version", CONFIGURATION_VERSION),
@@ -209,6 +184,10 @@ FORBIDDEN_TERMINALS = frozenset({
     "SEARCH_HORIZON_EXHAUSTED_AT_10_INTERIORS",
     "INTERIOR_COUNT_ABOVE_20",
     "SEARCH_HORIZON_EXHAUSTED_AT_20_INTERIORS",
+    "OPEN_BOUNDARY_BELOW_0_90",
+    "CLOSE_BOUNDARY_BELOW_0_90",
+    "BOTH_BOUNDARIES_BELOW_0_90",
+    "BOTH_BOUNDARIES_BELOW_MINIMUM",
     "OPEN_BOUNDARY_BELOW_0_80",
     "CLOSE_BOUNDARY_BELOW_0_80",
     "OPEN_BOUNDARY_BELOW_1_30",

@@ -117,6 +117,47 @@ class Swing:
     first_compatibility_failure_row: int | None = None
     last_compatibility_failure_row: int | None = None
     final_reference_matches_provisional: bool = True
+    segment_status: str = ""
+    peak_1_row: int | None = None
+    peak_1_price: Decimal | None = None
+    peak_1_count: int | None = None
+    peak_1_tie_count: int | None = None
+    peak_1_tie_first: int | None = None
+    peak_1_tie_last: int | None = None
+    peak_1_plateau_start: int | None = None
+    peak_1_plateau_end: int | None = None
+    peak_1_owned_by_open: bool | None = None
+    peak_1_owned_by_reference: bool | None = None
+    peak_2_row: int | None = None
+    peak_2_price: Decimal | None = None
+    peak_2_count: int | None = None
+    peak_2_tie_count: int | None = None
+    peak_2_tie_first: int | None = None
+    peak_2_tie_last: int | None = None
+    peak_2_plateau_start: int | None = None
+    peak_2_plateau_end: int | None = None
+    peak_2_owned_by_validation: bool | None = None
+    peak_2_owned_by_close: bool | None = None
+    dip_1_row: int | None = None
+    dip_1_price: Decimal | None = None
+    dip_1_count: int | None = None
+    dip_1_tie_count: int | None = None
+    dip_1_tie_first: int | None = None
+    dip_1_tie_last: int | None = None
+    dip_1_plateau_start: int | None = None
+    dip_1_plateau_end: int | None = None
+    dip_1_owned_by_open: bool | None = None
+    dip_1_owned_by_reference: bool | None = None
+    dip_2_row: int | None = None
+    dip_2_price: Decimal | None = None
+    dip_2_count: int | None = None
+    dip_2_tie_count: int | None = None
+    dip_2_tie_first: int | None = None
+    dip_2_tie_last: int | None = None
+    dip_2_plateau_start: int | None = None
+    dip_2_plateau_end: int | None = None
+    dip_2_owned_by_validation: bool | None = None
+    dip_2_owned_by_close: bool | None = None
 
 
 @dataclass(slots=True)
@@ -219,17 +260,17 @@ def duration_reason(interior: int) -> str | None:
 
 
 def boundary_reason(open_percent: Decimal, close_percent: Decimal) -> str | None:
-    if MIN_BOUNDARY != Decimal("0.90") or MAX_BOUNDARY is not None:
-        raise SpecialSwingError("boundary configuration is not 0.90 with no maximum")
+    if MIN_BOUNDARY != Decimal("1.00") or MAX_BOUNDARY is not None:
+        raise SpecialSwingError("boundary configuration is not 1.00 with no maximum")
     open_low = open_percent < MIN_BOUNDARY
     close_low = close_percent < MIN_BOUNDARY
     if not open_low and not close_low:
         return None
     if open_low and close_low:
-        return "BOTH_BOUNDARIES_BELOW_MINIMUM"
+        return "BOTH_BOUNDARIES_BELOW_1_00"
     if open_low:
-        return "OPEN_BOUNDARY_BELOW_0_90"
-    return "CLOSE_BOUNDARY_BELOW_0_90"
+        return "OPEN_BOUNDARY_BELOW_1_00"
+    return "CLOSE_BOUNDARY_BELOW_1_00"
 
 
 def analyze(bars: Sequence[Bar]) -> Analysis:
@@ -239,7 +280,7 @@ def analyze(bars: Sequence[Bar]) -> Analysis:
         raise SpecialSwingError("interior window is not 6 through 9")
     if FIRST_CLOSE_OFFSET != 7 or LAST_CLOSE_OFFSET != 10:
         raise SpecialSwingError("close offsets are not open_row + 7 through open_row + 10")
-    if CONFIGURATION_VERSION != "STANDARD_6_TO_9_DIRECTIONAL_REFERENCE_PAIR_NOT_PRE_CLOSE_COMPATIBILITY_V10":
+    if CONFIGURATION_VERSION != "STANDARD_6_TO_9_PEAK_DIP_BOUNDARY_1_00_MINIMAL_16_COLUMN_EXCEL_V12":
         raise SpecialSwingError("configuration version mismatch")
     if not bars:
         raise SpecialSwingError("at least one candle is required")
@@ -565,6 +606,84 @@ def select_interior_body_reference(
     }
 
 
+def _segment_extreme(bars: Sequence[Bar], start: int, end: int, use_high: bool) -> dict:
+    rows = range(start, end + 1)
+    price = max(bars[row].high for row in rows) if use_high else min(bars[row].low for row in rows)
+    ties = [row for row in rows if (bars[row].high if use_high else bars[row].low) == price]
+    owner = max(ties)
+    plateau_start = owner
+    while plateau_start - 1 >= start and (bars[plateau_start - 1].high if use_high else bars[plateau_start - 1].low) == price:
+        plateau_start -= 1
+    return {
+        "start": start,
+        "end": end,
+        "row": owner,
+        "price": price,
+        "count": end - start + 1,
+        "tie_count": len(ties),
+        "tie_first": min(ties),
+        "tie_last": owner,
+        "plateau_start": plateau_start,
+        "plateau_end": owner,
+    }
+
+
+def _segment_fields(bars: Sequence[Bar], open_row: int, close_row: int, direction: str, reference_row: int | None, validation_row: int | None) -> dict:
+    blank = {
+        "segment_status": (
+            "PEAK_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR"
+            if direction == SWING_HIGH
+            else "DIP_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR"
+        ),
+        "peak_1_row": None, "peak_1_price": None, "peak_1_count": None, "peak_1_tie_count": None,
+        "peak_1_tie_first": None, "peak_1_tie_last": None, "peak_1_plateau_start": None, "peak_1_plateau_end": None,
+        "peak_1_owned_by_open": None, "peak_1_owned_by_reference": None,
+        "peak_2_row": None, "peak_2_price": None, "peak_2_count": None, "peak_2_tie_count": None,
+        "peak_2_tie_first": None, "peak_2_tie_last": None, "peak_2_plateau_start": None, "peak_2_plateau_end": None,
+        "peak_2_owned_by_validation": None, "peak_2_owned_by_close": None,
+        "dip_1_row": None, "dip_1_price": None, "dip_1_count": None, "dip_1_tie_count": None,
+        "dip_1_tie_first": None, "dip_1_tie_last": None, "dip_1_plateau_start": None, "dip_1_plateau_end": None,
+        "dip_1_owned_by_open": None, "dip_1_owned_by_reference": None,
+        "dip_2_row": None, "dip_2_price": None, "dip_2_count": None, "dip_2_tie_count": None,
+        "dip_2_tie_first": None, "dip_2_tie_last": None, "dip_2_plateau_start": None, "dip_2_plateau_end": None,
+        "dip_2_owned_by_validation": None, "dip_2_owned_by_close": None,
+    }
+    if reference_row is None or validation_row is None:
+        return blank
+    prefix = "PEAK" if direction == SWING_HIGH else "DIP"
+    if validation_row != reference_row + 1:
+        raise SpecialSwingError(f"{prefix}_SEGMENT_GAP_ERROR")
+    if reference_row >= validation_row:
+        raise SpecialSwingError(f"{prefix}_SEGMENT_OVERLAP_ERROR")
+    covered = list(range(open_row, reference_row + 1)) + list(range(validation_row, close_row + 1))
+    expected = list(range(open_row, close_row + 1))
+    if covered != expected or len(covered) != len(set(covered)):
+        raise SpecialSwingError(f"{prefix}_SEGMENT_COVERAGE_ERROR")
+    use_high = direction == SWING_HIGH
+    first = _segment_extreme(bars, open_row, reference_row, use_high)
+    second = _segment_extreme(bars, validation_row, close_row, use_high)
+    if first["end"] + 1 != second["start"]:
+        raise SpecialSwingError(f"{prefix}_SEGMENT_GAP_ERROR")
+    fields = dict(blank)
+    fields["segment_status"] = f"{prefix}_1_CALCULATED; {prefix}_2_CALCULATED"
+    side = "peak" if use_high else "dip"
+    for label, segment, open_flag, close_flag in (
+        ("1", first, "owned_by_open", "owned_by_reference"),
+        ("2", second, "owned_by_validation", "owned_by_close"),
+    ):
+        fields[f"{side}_{label}_row"] = segment["row"]
+        fields[f"{side}_{label}_price"] = segment["price"]
+        fields[f"{side}_{label}_count"] = segment["count"]
+        fields[f"{side}_{label}_tie_count"] = segment["tie_count"]
+        fields[f"{side}_{label}_tie_first"] = segment["tie_first"]
+        fields[f"{side}_{label}_tie_last"] = segment["tie_last"]
+        fields[f"{side}_{label}_plateau_start"] = segment["plateau_start"]
+        fields[f"{side}_{label}_plateau_end"] = segment["plateau_end"]
+        fields[f"{side}_{label}_{open_flag}"] = segment["row"] == segment["start"]
+        fields[f"{side}_{label}_{close_flag}"] = segment["row"] == segment["end"]
+    return fields
+
+
 def _build(
     bars: Sequence[Bar],
     open_row: int,
@@ -649,6 +768,14 @@ def _build(
             raise SpecialSwingError("compatibility-failed candidate was bound")
         compatibility_status = "PASS"
         margin_percent = margin / close_price * D100
+    segments = _segment_fields(
+        bars,
+        open_row,
+        close_row,
+        direction,
+        reference_candle["row"],
+        reference_candle["validation_row"],
+    )
     return Swing(
         raw_id="",
         swing_id="",
@@ -711,6 +838,7 @@ def _build(
         first_compatibility_failure_row=first_failure_row,
         last_compatibility_failure_row=last_failure_row,
         final_reference_matches_provisional=True,
+        **segments,
     ), None
 
 
@@ -902,6 +1030,61 @@ def _check_body_reference(bars: Sequence[Bar], item: Swing) -> None:
         raise SpecialSwingError("FINAL_REFERENCE_MISMATCH_WITH_ACCEPTED_PROVISIONAL_REFERENCE")
 
 
+def _check_segments(bars: Sequence[Bar], item: Swing) -> None:
+    again = _segment_fields(
+        bars,
+        item.open_row,
+        item.close_row,
+        item.direction,
+        item.body_reference_row,
+        item.body_reference_validation_row,
+    )
+    for key, value in again.items():
+        if getattr(item, key) != value:
+            raise SpecialSwingError(f"segment field mismatch {key}")
+    if item.body_reference_row is None:
+        if item.direction == SWING_HIGH and item.segment_status != "PEAK_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR":
+            raise SpecialSwingError("PEAK_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR")
+        if item.direction == SWING_LOW and item.segment_status != "DIP_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR":
+            raise SpecialSwingError("DIP_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR")
+        return
+    if item.body_reference_validation_row != item.body_reference_row + 1:
+        prefix = "PEAK" if item.direction == SWING_HIGH else "DIP"
+        raise SpecialSwingError(f"{prefix}_SEGMENT_GAP_ERROR")
+    first_rows = range(item.open_row, item.body_reference_row + 1)
+    second_rows = range(item.body_reference_validation_row, item.close_row + 1)
+    if item.direction == SWING_HIGH:
+        peak_1 = max(bars[row].high for row in first_rows)
+        peak_2 = max(bars[row].high for row in second_rows)
+        if item.peak_1_price != peak_1 or item.peak_2_price != peak_2:
+            raise SpecialSwingError("peak price selection error")
+        if bars[item.peak_1_row].high != item.peak_1_price or bars[item.peak_2_row].high != item.peak_2_price:
+            raise SpecialSwingError("peak owner OHLC mismatch")
+        if max(item.peak_1_price, item.peak_2_price) != max(bar.high for bar in bars[item.open_row:item.close_row + 1]):
+            raise SpecialSwingError("PEAK_SEGMENT_COVERAGE_ERROR")
+        if item.peak_1_row != max(row for row in first_rows if bars[row].high == peak_1):
+            raise SpecialSwingError("peak tie representative is not the last match")
+        if item.peak_2_row != max(row for row in second_rows if bars[row].high == peak_2):
+            raise SpecialSwingError("peak tie representative is not the last match")
+        if item.dip_1_price is not None or item.dip_2_price is not None:
+            raise SpecialSwingError("swing high contains dip fields")
+        return
+    dip_1 = min(bars[row].low for row in first_rows)
+    dip_2 = min(bars[row].low for row in second_rows)
+    if item.dip_1_price != dip_1 or item.dip_2_price != dip_2:
+        raise SpecialSwingError("dip price selection error")
+    if bars[item.dip_1_row].low != item.dip_1_price or bars[item.dip_2_row].low != item.dip_2_price:
+        raise SpecialSwingError("dip owner OHLC mismatch")
+    if min(item.dip_1_price, item.dip_2_price) != min(bar.low for bar in bars[item.open_row:item.close_row + 1]):
+        raise SpecialSwingError("DIP_SEGMENT_COVERAGE_ERROR")
+    if item.dip_1_row != max(row for row in first_rows if bars[row].low == dip_1):
+        raise SpecialSwingError("dip tie representative is not the last match")
+    if item.dip_2_row != max(row for row in second_rows if bars[row].low == dip_2):
+        raise SpecialSwingError("dip tie representative is not the last match")
+    if item.peak_1_price is not None or item.peak_2_price is not None:
+        raise SpecialSwingError("swing low contains peak fields")
+
+
 def _check_invariants(bars: Sequence[Bar], raw: list[Swing], searches: list[SearchRecord]) -> None:
     seen = set()
     for item in raw:
@@ -914,7 +1097,8 @@ def _check_invariants(bars: Sequence[Bar], raw: list[Swing], searches: list[Sear
         if item.body_size <= 0 or item.penetration_fraction < REQUIRED_FRACTION:
             raise SpecialSwingError("body penetration is below one third")
         if item.open_width_percent < MIN_BOUNDARY or item.close_width_percent < MIN_BOUNDARY:
-            raise SpecialSwingError("confirmed boundary is below 0.90")
+            raise SpecialSwingError("confirmed boundary is below 1.00")
+        _check_segments(bars, item)
         opened = bars[item.open_row]
         closed = bars[item.close_row]
         if item.direction == SWING_HIGH:
@@ -968,14 +1152,15 @@ def _counters(raw: list[Swing], searches: list[SearchRecord], displayed: list[Sw
         "wick_only_events": sum(item.wick_only for item in searches),
         "wick_only_confirmations": 0,
         "doji_rejections": sum(1 for item in searches if item.terminal == "SWING_OPEN_BODY_ZERO"),
-        "open_boundary_below_0_90": sum(1 for item in searches if item.terminal == "OPEN_BOUNDARY_BELOW_0_90"),
-        "close_boundary_below_0_90": sum(1 for item in searches if item.terminal == "CLOSE_BOUNDARY_BELOW_0_90"),
-        "both_boundaries_below_minimum": sum(1 for item in searches if item.terminal == "BOTH_BOUNDARIES_BELOW_MINIMUM"),
-        "confirmed_below_0_90": 0,
+        "open_boundary_below_1_00": sum(1 for item in searches if item.terminal == "OPEN_BOUNDARY_BELOW_1_00"),
+        "close_boundary_below_1_00": sum(1 for item in searches if item.terminal == "CLOSE_BOUNDARY_BELOW_1_00"),
+        "both_boundaries_below_1_00": sum(1 for item in searches if item.terminal == "BOTH_BOUNDARIES_BELOW_1_00"),
+        "confirmed_below_1_00": 0,
         "candidate_above_9_interiors_evaluated": sum(item.above_horizon for item in searches),
         "candidate_with_10_interiors_confirmed": sum(1 for item in raw if item.interior >= 10),
         "candidate_below_6_interiors_confirmed": sum(1 for item in raw if item.interior < 6),
-        "candidate_below_0_90_boundary_confirmed": 0,
+        "candidate_below_1_00_boundary_confirmed": 0,
+        "candidate_below_1_00_boundary_confirmed_count": 0,
         "horizon_exhausted": sum(1 for item in searches if item.terminal == "SEARCH_HORIZON_EXHAUSTED_AT_9_INTERIORS"),
         "censored": sum(1 for item in searches if item.terminal == "SEARCH_CENSORED_BY_DATASET_END"),
         "not_yet_eligible": sum(1 for item in searches if item.terminal == "SEARCH_NOT_YET_ELIGIBLE_BELOW_6_INTERIORS"),
@@ -1112,6 +1297,45 @@ def _counters(raw: list[Swing], searches: list[SearchRecord], displayed: list[Sw
         "final_reference_mismatch_count": sum(1 for item in raw if not item.final_reference_matches_provisional),
         "reference_pair_wrong_direction_count": 0,
         "lookahead_violation_count": 0,
+        "peak_1_calculated": sum(1 for item in raw if item.peak_1_row is not None),
+        "peak_2_calculated": sum(1 for item in raw if item.peak_2_row is not None),
+        "dip_1_calculated": sum(1 for item in raw if item.dip_1_row is not None),
+        "dip_2_calculated": sum(1 for item in raw if item.dip_2_row is not None),
+        "peak_1_displayed": sum(1 for item in displayed if item.peak_1_row is not None),
+        "peak_2_displayed": sum(1 for item in displayed if item.peak_2_row is not None),
+        "dip_1_displayed": sum(1 for item in displayed if item.dip_1_row is not None),
+        "dip_2_displayed": sum(1 for item in displayed if item.dip_2_row is not None),
+        "peak_segment_gap_count": 0,
+        "peak_segment_overlap_count": 0,
+        "peak_segment_coverage_error_count": 0,
+        "dip_segment_gap_count": 0,
+        "dip_segment_overlap_count": 0,
+        "dip_segment_coverage_error_count": 0,
+        "peak_price_selection_error_count": 0,
+        "dip_price_selection_error_count": 0,
+        "peak_owner_ohlc_mismatch_count": 0,
+        "dip_owner_ohlc_mismatch_count": 0,
+        "peak_dip_used_as_filter_count": 0,
+        "peak_dip_used_for_boundary_count": 0,
+        "peak_1_tie_segments": sum(1 for item in displayed if item.peak_1_tie_count is not None and item.peak_1_tie_count > 1),
+        "peak_2_tie_segments": sum(1 for item in displayed if item.peak_2_tie_count is not None and item.peak_2_tie_count > 1),
+        "dip_1_tie_segments": sum(1 for item in displayed if item.dip_1_tie_count is not None and item.dip_1_tie_count > 1),
+        "dip_2_tie_segments": sum(1 for item in displayed if item.dip_2_tie_count is not None and item.dip_2_tie_count > 1),
+        "peak_1_owned_by_swing_open": sum(1 for item in displayed if item.peak_1_owned_by_open),
+        "peak_1_owned_by_reference": sum(1 for item in displayed if item.peak_1_owned_by_reference),
+        "peak_2_owned_by_validation": sum(1 for item in displayed if item.peak_2_owned_by_validation),
+        "peak_2_owned_by_swing_close": sum(1 for item in displayed if item.peak_2_owned_by_close),
+        "dip_1_owned_by_swing_open": sum(1 for item in displayed if item.dip_1_owned_by_open),
+        "dip_1_owned_by_reference": sum(1 for item in displayed if item.dip_1_owned_by_reference),
+        "dip_2_owned_by_validation": sum(1 for item in displayed if item.dip_2_owned_by_validation),
+        "dip_2_owned_by_swing_close": sum(1 for item in displayed if item.dip_2_owned_by_close),
+        "missing_peak_segments": sum(
+            1 for item in displayed if item.segment_status == "PEAK_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR"
+        ),
+        "missing_dip_segments": sum(
+            1 for item in displayed if item.segment_status == "DIP_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR"
+        ),
+        "peak_dip_repaint_count": 0,
     }
 
 
@@ -1135,6 +1359,15 @@ def signature(result: Analysis) -> str:
             "compatibility_status": item.compatibility_status,
             "margin": None if item.reference_to_swing_close_margin is None else format(item.reference_to_swing_close_margin, "f"),
             "earlier_compatibility_rejections": item.earlier_compatibility_rejections,
+            "segment_status": item.segment_status,
+            "peak_1_row": item.peak_1_row,
+            "peak_1_price": None if item.peak_1_price is None else format(item.peak_1_price, "f"),
+            "peak_2_row": item.peak_2_row,
+            "peak_2_price": None if item.peak_2_price is None else format(item.peak_2_price, "f"),
+            "dip_1_row": item.dip_1_row,
+            "dip_1_price": None if item.dip_1_price is None else format(item.dip_1_price, "f"),
+            "dip_2_row": item.dip_2_row,
+            "dip_2_price": None if item.dip_2_price is None else format(item.dip_2_price, "f"),
         }
         for item in result.raw
     ]

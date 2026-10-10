@@ -6,7 +6,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.workbook.properties import CalcProperties
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
@@ -16,37 +16,42 @@ from detectors.swing_open_close_30m_special_v1.config import (
     RESULT_COLUMNS,
     SHEETS,
     SWING_HIGH,
-    SWING_LOW,
     USER_PARAMETERS,
 )
 from detectors.swing_open_close_30m_special_v1.engine import Analysis, candle_direction, turkey_text
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT = Font(color="FFFFFF", bold=True, name="Calibri")
-BULLISH_FONT = Font(color="006600", bold=True, name="Calibri")
-BEARISH_FONT = Font(color="990000", bold=True, name="Calibri")
 HIGH_FILL = PatternFill("solid", fgColor="F4CCCC")
 HIGH_ALT = PatternFill("solid", fgColor="F8E0E0")
 LOW_FILL = PatternFill("solid", fgColor="D9EAD3")
 LOW_ALT = PatternFill("solid", fgColor="E7F3E4")
 REFERENCE_FILL = PatternFill("solid", fgColor="D6EAF8")
-VALIDATION_FILL = PatternFill("solid", fgColor="FDEBD0")
-COMPATIBILITY_FILL = PatternFill("solid", fgColor="F5EEF8")
+PEAK_FILL = PatternFill("solid", fgColor="FDEDEC")
+DIP_FILL = PatternFill("solid", fgColor="E8F8F5")
 WRAP = Alignment(wrap_text=True, vertical="center")
 EIGHT = Decimal("0.00000001")
-PRICE_COLUMNS = (9, 10, 11, 12, 16, 17, 18, 19, 23, 30, 31, 32, 33, 34, 37, 38, 39, 40, 44, 47, 55, 56, 57)
-PERCENT_COLUMNS = (45, 48, 50, 51, 58, 59)
-REFERENCE_COLUMNS = range(24, 35)
-VALIDATION_COLUMNS = range(35, 41)
-PRE_CLOSE_COLUMNS = range(41, 43)
-COMPATIBILITY_COLUMNS = range(43, 46)
-DIRECTION_COLUMNS = (8, 15, 29, 36)
+PRICE_COLUMNS = (5, 6, 7, 8, 10, 12, 14, 16)
+REFERENCE_COLUMNS = range(4, 9)
+PEAK_COLUMNS = range(9, 13)
+DIP_COLUMNS = range(13, 17)
 TABLE_NAMES = {
     "Special Swings": "SpecialSwings",
     "Swing Highs": "SwingHighs",
     "Swing Lows": "SwingLows",
     "Parameters": "DetectorParameters",
 }
+FORBIDDEN_HEADERS = (
+    "SWING ID",
+    "UTC",
+    "BOUNDARY",
+    "EXTREMUM",
+    "COMPATIBILITY",
+    "VALIDATION",
+    "DIAGNOSTIC",
+    "RAW ID",
+    "FAMILY",
+)
 
 
 def shown(value: Decimal) -> Decimal:
@@ -57,72 +62,37 @@ def _optional(value) -> Decimal | None:
     return None if value is None else shown(value)
 
 
+def _time_price(bars, row, price) -> tuple:
+    if row is None or price is None:
+        return None, None
+    return turkey_text(bars[row].open_time), shown(price)
+
+
 def _row(item, bars) -> list:
     opened = bars[item.open_row]
     closed = bars[item.close_row]
-    extreme = bars[item.extreme_row]
     reference = None if item.body_reference_row is None else bars[item.body_reference_row]
-    validation = None if item.body_reference_validation_row is None else bars[item.body_reference_validation_row]
+    peak_1_time, peak_1_price = _time_price(bars, item.peak_1_row, item.peak_1_price)
+    peak_2_time, peak_2_price = _time_price(bars, item.peak_2_row, item.peak_2_price)
+    dip_1_time, dip_1_price = _time_price(bars, item.dip_1_row, item.dip_1_price)
+    dip_2_time, dip_2_price = _time_price(bars, item.dip_2_row, item.dip_2_price)
     return [
-        item.swing_id,
         item.direction,
-        item.formation_class,
-        item.interior,
-        item.total,
         turkey_text(opened.open_time),
-        turkey_text(opened.close_time),
-        candle_direction(opened.open, opened.close),
-        shown(opened.open),
-        shown(opened.high),
-        shown(opened.low),
-        shown(opened.close),
         turkey_text(closed.open_time),
-        turkey_text(closed.close_time),
-        candle_direction(closed.open, closed.close),
-        shown(closed.open),
-        shown(closed.high),
-        shown(closed.low),
-        shown(closed.close),
-        item.earlier_compatibility_rejections,
-        turkey_text(extreme.open_time),
-        "HIGH" if item.direction == SWING_HIGH else "LOW",
-        shown(item.extreme_price),
-        item.body_reference_status,
-        item.body_reference_pair_type or None,
-        item.body_reference_rule,
-        item.body_reference_eligible_count,
         None if reference is None else turkey_text(reference.open_time),
-        item.body_reference_direction or None,
         _optional(None if reference is None else reference.open),
         _optional(None if reference is None else reference.high),
         _optional(None if reference is None else reference.low),
         _optional(None if reference is None else reference.close),
-        _optional(item.body_reference_price),
-        None if validation is None else turkey_text(validation.open_time),
-        item.body_reference_validation_direction or None,
-        _optional(None if validation is None else validation.open),
-        _optional(None if validation is None else validation.high),
-        _optional(None if validation is None else validation.low),
-        _optional(None if validation is None else validation.close),
-        None if reference is None else "No",
-        item.body_reference_bars_before_close,
-        item.compatibility_status or None,
-        _optional(item.reference_to_swing_close_margin),
-        _optional(item.reference_to_swing_close_margin_percent),
-        item.body_reference_row_difference,
-        _optional(item.body_reference_close_change),
-        _optional(item.body_reference_close_change_percent),
-        item.body_reference_bars_after_open,
-        _optional(item.body_reference_position_fraction),
-        _optional(item.body_reference_validation_position_fraction),
-        item.body_reference_tie_count,
-        None if item.body_reference_matches_extremum is None else ("Yes" if item.body_reference_matches_extremum else "No"),
-        None if item.body_reference_validation_matches_extremum is None else ("Yes" if item.body_reference_validation_matches_extremum else "No"),
-        _optional(item.extremum_to_body_reference_distance),
-        shown(item.structure_high),
-        shown(item.structure_low),
-        shown(item.open_width_percent),
-        shown(item.close_width_percent),
+        peak_1_time,
+        peak_1_price,
+        peak_2_time,
+        peak_2_price,
+        dip_1_time,
+        dip_1_price,
+        dip_2_time,
+        dip_2_price,
     ]
 
 
@@ -132,38 +102,32 @@ def _paint(sheet, rows: list[list]) -> None:
         cell.font = HEADER_FONT
         cell.alignment = WRAP
     for index, row in enumerate(rows, start=2):
-        fill = (HIGH_ALT if index % 2 == 0 else HIGH_FILL) if row[1] == SWING_HIGH else (LOW_ALT if index % 2 == 0 else LOW_FILL)
+        fill = (HIGH_ALT if index % 2 == 0 else HIGH_FILL) if row[0] == SWING_HIGH else (LOW_ALT if index % 2 == 0 else LOW_FILL)
         for cell in sheet[index]:
             cell.fill = fill
         for column in REFERENCE_COLUMNS:
             sheet.cell(index, column).fill = REFERENCE_FILL
-        for column in VALIDATION_COLUMNS:
-            sheet.cell(index, column).fill = VALIDATION_FILL
-        for column in PRE_CLOSE_COLUMNS:
-            sheet.cell(index, column).fill = REFERENCE_FILL
-        for column in COMPATIBILITY_COLUMNS:
-            sheet.cell(index, column).fill = COMPATIBILITY_FILL
-        for column in DIRECTION_COLUMNS:
-            label = sheet.cell(index, column).value
-            if label == "BULLISH":
-                sheet.cell(index, column).font = BULLISH_FONT
-            elif label == "BEARISH":
-                sheet.cell(index, column).font = BEARISH_FONT
-        for column in PRICE_COLUMNS + PERCENT_COLUMNS:
+        for column in PEAK_COLUMNS:
+            sheet.cell(index, column).fill = PEAK_FILL
+        for column in DIP_COLUMNS:
+            sheet.cell(index, column).fill = DIP_FILL
+        for column in PRICE_COLUMNS:
             sheet.cell(index, column).number_format = "0.00000000"
     sheet.freeze_panes = "A2"
     last_row = max(1, sheet.max_row)
-    last_column = get_column_letter(len(RESULT_COLUMNS))
-    sheet.auto_filter.ref = f"A1:{last_column}{last_row}"
+    sheet.auto_filter.ref = f"A1:P{last_row}"
     sheet.row_dimensions[1].height = 32
-    for column in range(1, len(RESULT_COLUMNS) + 1):
-        sheet.column_dimensions[get_column_letter(column)].width = 24
-    table = Table(displayName=TABLE_NAMES[sheet.title], ref=f"A1:{last_column}{last_row}")
+    for column in range(1, 17):
+        sheet.column_dimensions[get_column_letter(column)].width = 28
+        sheet.column_dimensions[get_column_letter(column)].hidden = False
+    table = Table(displayName=TABLE_NAMES[sheet.title], ref=f"A1:P{last_row}")
     table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
     sheet.add_table(table)
 
 
 def write_workbook(path: Path, result: Analysis) -> None:
+    if len(RESULT_COLUMNS) != 16:
+        raise RuntimeError("result contract is not 16 columns")
     book = Workbook()
     book.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=False)
     book.remove(book.active)
@@ -171,12 +135,14 @@ def write_workbook(path: Path, result: Analysis) -> None:
     rows = [_row(item, result.bars) for item in ordered]
     for title, selected in (
         ("Special Swings", rows),
-        ("Swing Highs", [row for row in rows if row[1] == SWING_HIGH]),
-        ("Swing Lows", [row for row in rows if row[1] == "SWING_LOW"]),
+        ("Swing Highs", [row for row in rows if row[0] == SWING_HIGH]),
+        ("Swing Lows", [row for row in rows if row[0] != SWING_HIGH]),
     ):
         sheet = book.create_sheet(title)
         sheet.append(list(RESULT_COLUMNS))
         for row in selected:
+            if len(row) != 16:
+                raise RuntimeError("result row is not 16 columns")
             sheet.append(row)
         _paint(sheet, selected)
     parameters = book.create_sheet("Parameters")
@@ -201,100 +167,98 @@ def write_workbook(path: Path, result: Analysis) -> None:
     book.close()
 
 
-def _validate_reference_row(row, result: Analysis) -> None:
-    item = next(candidate for candidate in result.displayed if candidate.swing_id == row[0])
-    blank_indexes = (24, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 43, 44, 45, 46, 47, 48, 49, 50, 52, 53, 54)
-    if row[25] != item.body_reference_rule or not row[25]:
-        raise RuntimeError("body reference selection rule is missing")
-    if "SINGLE" in str(row[25]).upper() or "AMONG_STRICTLY_INTERIOR_BEARISH_CANDLES" in str(row[25]):
-        raise RuntimeError("obsolete single-candle reference rule is present")
-    if row[42] == "FAIL":
-        raise RuntimeError("accepted row contains failed compatibility")
-    if int(row[19]) != item.earlier_compatibility_rejections:
-        raise RuntimeError("earlier compatibility rejection count is wrong")
-    if item.body_reference_row is None:
-        if row[23] not in {
-            "NO_BEARISH_TO_BULLISH_INTERIOR_PAIR_FOR_SWING_HIGH",
-            "NO_BULLISH_TO_BEARISH_INTERIOR_PAIR_FOR_SWING_LOW",
-        }:
-            raise RuntimeError("missing body reference status is wrong")
-        if row[42] != "NOT_APPLICABLE_NO_REFERENCE_PAIR":
-            raise RuntimeError("missing pair compatibility status is wrong")
-        if any(row[index] not in (None, "") for index in blank_indexes):
-            raise RuntimeError("missing body reference contains a price or timestamp")
-        if row[26] != 0 or row[51] != 0:
-            raise RuntimeError("missing body reference counts are not zero")
-        return
-    candle = result.bars[item.body_reference_row]
-    follower = result.bars[item.body_reference_validation_row]
-    if item.body_reference_validation_row != item.body_reference_row + 1:
-        raise RuntimeError("reference pair is not consecutive")
-    if not (item.open_row < item.body_reference_row < item.body_reference_validation_row < item.close_row):
-        raise RuntimeError("reference pair is not strictly interior")
-    if row[27] != turkey_text(candle.open_time) or row[34] != turkey_text(follower.open_time):
-        raise RuntimeError("reference pair Turkey time does not match the source candles")
-    expected_reference = "BEARISH" if item.direction == SWING_HIGH else "BULLISH"
-    expected_validation = "BULLISH" if item.direction == SWING_HIGH else "BEARISH"
-    if row[28] != expected_reference or row[35] != expected_validation:
-        raise RuntimeError("reference pair directions are wrong")
-    if row[40] != "No":
-        raise RuntimeError("selected reference is immediately before Swing Close")
-    if int(row[41]) != item.close_row - item.body_reference_row or int(row[41]) < 2:
-        raise RuntimeError("reference rows before Swing Close are below 2")
-    if row[42] != "PASS":
-        raise RuntimeError("accepted reference compatibility did not pass")
-    if row[45] != 1:
-        raise RuntimeError("reference-to-validation row difference is not 1")
-    if item.direction == SWING_HIGH and item.body_reference_price < item.close_price:
-        raise RuntimeError("swing high reference close is below the swing close")
-    if item.direction == SWING_LOW and item.body_reference_price > item.close_price:
-        raise RuntimeError("swing low reference close is above the swing close")
-    compared = (
-        (29, candle.open),
-        (30, candle.high),
-        (31, candle.low),
-        (32, candle.close),
-        (33, item.body_reference_price),
-        (36, follower.open),
-        (37, follower.high),
-        (38, follower.low),
-        (39, follower.close),
-        (43, item.reference_to_swing_close_margin),
-        (44, item.reference_to_swing_close_margin_percent),
-        (46, item.body_reference_close_change),
-        (47, item.body_reference_close_change_percent),
-        (49, item.body_reference_position_fraction),
-        (50, item.body_reference_validation_position_fraction),
-        (54, item.extremum_to_body_reference_distance),
-    )
-    for index, value in compared:
-        if _cell_decimal(row[index]) != shown(value):
-            raise RuntimeError(f"body reference column {index + 1} does not match the source candle")
-    if int(row[48]) != item.body_reference_bars_after_open:
-        raise RuntimeError("body reference bar offsets are wrong")
-    if item.body_reference_price == candle.low or item.body_reference_price == candle.high:
-        if candle.low == candle.close or candle.high == candle.close:
-            pass
-        else:
-            raise RuntimeError("reference price was taken from a wick")
-    if int(row[26]) != item.body_reference_eligible_count or int(row[51]) != item.body_reference_tie_count:
-        raise RuntimeError("body reference pair counts are wrong")
-    if row[52] != ("Yes" if item.body_reference_matches_extremum else "No"):
-        raise RuntimeError("body reference extremum match flag is wrong")
-    if row[53] != ("Yes" if item.body_reference_validation_matches_extremum else "No"):
-        raise RuntimeError("validation extremum match flag is wrong")
-    if item.body_reference_price != candle.close:
-        raise RuntimeError("body reference price is not the reference candle Close")
-    if item.extremum_to_body_reference_distance < 0:
-        raise RuntimeError("extremum-to-body-reference distance is negative")
-    if item.reference_to_swing_close_margin < 0:
-        raise RuntimeError("accepted compatibility margin is negative")
-
-
 def _cell_decimal(value) -> Decimal:
     if isinstance(value, Decimal):
         return value
     return Decimal(format(value, ".8f"))
+
+
+def _blank(value) -> bool:
+    return value in (None, "")
+
+
+def _validate_result_row(row, item, bars) -> None:
+    if len([value for value in row if not _blank(value) or True]) < 16:
+        raise RuntimeError("result row is shorter than 16 columns")
+    if any(not _blank(value) for value in row[16:]):
+        raise RuntimeError("result row contains a value outside columns A:P")
+    opened = bars[item.open_row]
+    closed = bars[item.close_row]
+    if item.formation_class != FORMATION_CLASS or item.interior < 6 or item.interior > 9:
+        raise RuntimeError("confirmed interior is outside 6-9")
+    if item.open_width_percent < MIN_BOUNDARY or item.close_width_percent < MIN_BOUNDARY:
+        raise RuntimeError("confirmed boundary is below 1.00")
+    if row[0] != item.direction:
+        raise RuntimeError("swing type does not match the confirmed structure")
+    if row[1] != turkey_text(opened.open_time) or row[2] != turkey_text(closed.open_time):
+        raise RuntimeError("Turkey open timestamps do not match the source candles")
+    if "UTC" in str(row[1]) or "UTC" in str(row[2]):
+        raise RuntimeError("UTC timestamp leaked into a result sheet")
+    if item.direction == SWING_HIGH:
+        if candle_direction(opened.open, opened.close) != "BULLISH" or candle_direction(closed.open, closed.close) != "BEARISH":
+            raise RuntimeError("swing high direction is wrong")
+    elif candle_direction(opened.open, opened.close) != "BEARISH" or candle_direction(closed.open, closed.close) != "BULLISH":
+        raise RuntimeError("swing low direction is wrong")
+    if item.body_reference_row is None:
+        if any(not _blank(row[index]) for index in range(3, 16)):
+            raise RuntimeError("missing reference fabricated a result value")
+        return
+    candle = bars[item.body_reference_row]
+    if row[3] != turkey_text(candle.open_time):
+        raise RuntimeError("reference Turkey time does not match the source candle")
+    compared = ((4, candle.open), (5, candle.high), (6, candle.low), (7, candle.close))
+    for index, value in compared:
+        if _cell_decimal(row[index]) != shown(value):
+            raise RuntimeError("reference OHLC does not match the source candle")
+    if item.body_reference_price != candle.close:
+        raise RuntimeError("reference price is not the reference candle Close")
+    if item.direction == SWING_HIGH:
+        if any(not _blank(row[index]) for index in (12, 13, 14, 15)):
+            raise RuntimeError("swing high contains a dip value")
+        _validate_extreme(row, 8, bars, item.peak_1_row, item.peak_1_price, "high")
+        _validate_extreme(row, 10, bars, item.peak_2_row, item.peak_2_price, "high")
+        return
+    if any(not _blank(row[index]) for index in (8, 9, 10, 11)):
+        raise RuntimeError("swing low contains a peak value")
+    _validate_extreme(row, 12, bars, item.dip_1_row, item.dip_1_price, "low")
+    _validate_extreme(row, 14, bars, item.dip_2_row, item.dip_2_price, "low")
+
+
+def _validate_extreme(row, start: int, bars, owner_row, price, field: str) -> None:
+    candle = bars[owner_row]
+    expected_price = candle.high if field == "high" else candle.low
+    if row[start] != turkey_text(candle.open_time):
+        raise RuntimeError("segment owner Turkey time does not match the source candle")
+    if _cell_decimal(row[start + 1]) != shown(expected_price) or _cell_decimal(row[start + 1]) != shown(price):
+        raise RuntimeError("segment price does not match the owner candle")
+
+
+def _contract(sheet) -> None:
+    headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1, max_col=16))]
+    if tuple(headers) != RESULT_COLUMNS or len(headers) != 16:
+        raise RuntimeError(f"{sheet.title} headers differ")
+    if sheet.max_column != 16:
+        raise RuntimeError(f"{sheet.title} has {sheet.max_column} columns")
+    joined = " ".join(str(header).upper() for header in headers)
+    if any(token in joined for token in FORBIDDEN_HEADERS):
+        raise RuntimeError(f"{sheet.title} contains a forbidden header")
+    for row in sheet.iter_rows(min_col=17, max_col=max(sheet.max_column, 17), values_only=True):
+        if any(not _blank(value) for value in row):
+            raise RuntimeError(f"{sheet.title} contains a value outside columns A:P")
+    if list(sheet.merged_cells.ranges):
+        raise RuntimeError(f"{sheet.title} contains merged cells")
+    if len(sheet.tables) != 1:
+        raise RuntimeError(f"{sheet.title} table count is {len(sheet.tables)}")
+    table = next(iter(sheet.tables.values()))
+    if table.ref != f"A1:P{sheet.max_row}":
+        raise RuntimeError(f"{sheet.title} table range is {table.ref}")
+    for key, dimension in sheet.column_dimensions.items():
+        index = column_index_from_string(getattr(dimension, "index", None) or key)
+        if dimension.hidden or index > 16:
+            raise RuntimeError(f"{sheet.title} has a hidden or extra column")
+    for dimension in sheet.row_dimensions.values():
+        if dimension.hidden:
+            raise RuntimeError(f"{sheet.title} has a hidden row")
 
 
 def validate_workbook(path: Path, result: Analysis) -> dict:
@@ -304,17 +268,26 @@ def validate_workbook(path: Path, result: Analysis) -> dict:
     try:
         if normal.sheetnames != list(SHEETS) or readonly.sheetnames != list(SHEETS) or data_only.sheetnames != list(SHEETS):
             raise RuntimeError(f"sheets {normal.sheetnames}")
+        if any(sheet.sheet_state != "visible" for sheet in normal.worksheets):
+            raise RuntimeError("workbook contains a hidden worksheet")
         if normal.vba_archive is not None or list(normal._external_links):
             raise RuntimeError("workbook contains macros or external links")
+        for book in (normal, readonly, data_only):
+            for name in ("Special Swings", "Swing Highs", "Swing Lows"):
+                header = next(book[name].iter_rows(min_row=1, max_row=1, max_col=16, values_only=True))
+                if tuple(header) != RESULT_COLUMNS:
+                    raise RuntimeError(f"{name} columns differ")
         for name in ("Special Swings", "Swing Highs", "Swing Lows"):
-            headers = [cell.value for cell in next(normal[name].iter_rows(max_row=1))]
-            if tuple(headers) != RESULT_COLUMNS:
-                raise RuntimeError(f"{name} columns differ")
-            if any(header and "UTC" in str(header).upper() for header in headers):
-                raise RuntimeError("UTC column present")
-            if not normal[name].tables:
-                raise RuntimeError(f"{name} has no Excel table")
-        values = {row[0]: row[1] for row in normal["Parameters"].iter_rows(min_row=2, values_only=True)}
+            _contract(normal[name])
+        parameter_header = next(normal["Parameters"].iter_rows(min_row=1, max_row=1, max_col=2, values_only=True))
+        if parameter_header != ("Parameter", "Value") or normal["Parameters"].max_column != 2:
+            raise RuntimeError("parameters sheet is not limited to Parameter and Value")
+        if len(normal["Parameters"].tables) != 1:
+            raise RuntimeError("parameters sheet table count is wrong")
+        parameter_table = next(iter(normal["Parameters"].tables.values()))
+        if not parameter_table.ref.startswith("A1:B"):
+            raise RuntimeError("parameters table is not limited to columns A:B")
+        values = {row[0]: row[1] for row in normal["Parameters"].iter_rows(min_row=2, max_col=2, values_only=True)}
         if values != dict(USER_PARAMETERS):
             raise RuntimeError("parameters sheet does not match the configured list")
         blob = " ".join(str(item) for item in values.values())
@@ -332,42 +305,61 @@ def validate_workbook(path: Path, result: Analysis) -> dict:
             raise RuntimeError("compatibility continuation rule is wrong")
         if values["Search Extension Beyond Nine Interiors"] != "No" or values["Second-Best Reference May Replace Failed Min/Max"] != "No":
             raise RuntimeError("compatibility search limit is wrong")
-        if "NOT_PRE_CLOSE_COMPATIBILITY_V10" not in values["Configuration Version"]:
-            raise RuntimeError("configuration version is not V10")
+        if "MINIMAL_16_COLUMN_EXCEL_V12" not in values["Configuration Version"]:
+            raise RuntimeError("configuration version is not V12")
+        if values["Minimum Boundary Percent"] != "1.00%" or "0.90%" in blob:
+            raise RuntimeError("minimum boundary is not 1.00%")
+        if values["Result Worksheet Column Count"] != "16" or values["Hidden Result Columns"] != "None":
+            raise RuntimeError("result column contract is wrong")
+        if values["Extra Result Columns"] != "None":
+            raise RuntimeError("extra result columns are configured")
+        if values["Peak/Dip Fields Are Hard Filters"] != "No" or values["Peak/Dip Used For Boundary Calculation"] != "No":
+            raise RuntimeError("peak and dip fields are configured as filters")
+        if values["Peak/Dip Used For Primary Selection"] != "No":
+            raise RuntimeError("peak and dip fields are configured as primary inputs")
         if values["Pre-Close Interior Candle Eligible As Reference"] != "No" or values["Reference Row Maximum"] != "close_row - 2":
             raise RuntimeError("pre-close reference exclusion is missing")
         if values["Reference OHLC Exported"] != "Open, High, Low, Close":
             raise RuntimeError("reference OHLC export is missing")
         if values["First Eligible Swing Close Offset"] != "open_row + 7" or values["Final Eligible Swing Close Offset"] != "open_row + 10":
             raise RuntimeError("close offsets are not +7 and +10")
+        ordered = sorted(result.displayed, key=lambda item: (item.open_row, item.close_row, item.swing_id))
+        grouped = {
+            "Special Swings": ordered,
+            "Swing Highs": [item for item in ordered if item.direction == SWING_HIGH],
+            "Swing Lows": [item for item in ordered if item.direction != SWING_HIGH],
+        }
         counts = {}
-        for sheet_name in ("Special Swings", "Swing Highs", "Swing Lows"):
-            rows = [row for row in normal[sheet_name].iter_rows(min_row=2, values_only=True) if row[0]]
+        for sheet_name, items in grouped.items():
+            rows = [row for row in normal[sheet_name].iter_rows(min_row=2, max_col=16, values_only=True) if row[0]]
             counts[sheet_name] = len(rows)
-            for row in rows:
-                if row[2] != FORMATION_CLASS:
-                    raise RuntimeError("non-standard formation in workbook")
-                interior = int(row[3])
-                total = int(row[4])
-                if interior < 6 or interior > 9 or total < 8 or total > 11 or total != interior + 2:
-                    raise RuntimeError("workbook duration is outside 6-9 interiors")
-                if interior == 10 or interior < 6:
-                    raise RuntimeError("obsolete duration retained")
-                if _cell_decimal(row[57]) < MIN_BOUNDARY or _cell_decimal(row[58]) < MIN_BOUNDARY:
-                    raise RuntimeError("workbook boundary is below 0.90")
-                if "UTC" in str(row[5]) or "UTC" in str(row[12]):
-                    raise RuntimeError("UTC timestamp leaked into a result sheet")
-                if row[1] == SWING_HIGH and (row[7] != "BULLISH" or row[14] != "BEARISH"):
-                    raise RuntimeError("swing high direction labels are wrong")
-                if row[1] != SWING_HIGH and (row[7] != "BEARISH" or row[14] != "BULLISH"):
-                    raise RuntimeError("swing low direction labels are wrong")
-                _validate_reference_row(row, result)
-        expected = len(result.displayed)
-        highs = sum(1 for item in result.displayed if item.direction == SWING_HIGH)
-        lows = expected - highs
-        if counts != {"Special Swings": expected, "Swing Highs": highs, "Swing Lows": lows}:
-            raise RuntimeError(f"row counts {counts}")
-        return {"sheets": list(normal.sheetnames), "rows": counts, "readable": True, "macros": False, "external_links": False}
+            if len(rows) != len(items):
+                raise RuntimeError(f"{sheet_name} row count {len(rows)} != {len(items)}")
+            for row, item in zip(rows, items):
+                _validate_result_row(row, item, result.bars)
+        return {
+            "sheets": list(normal.sheetnames),
+            "rows": counts,
+            "readable": True,
+            "macros": False,
+            "external_links": False,
+            "result_sheet_column_count": 16,
+            "result_sheet_last_column": "P",
+            "result_sheet_wrong_header_count": 0,
+            "result_sheet_wrong_header_order_count": 0,
+            "result_sheet_extra_column_count": 0,
+            "result_sheet_hidden_column_count": 0,
+            "result_sheet_technical_column_count": 0,
+            "result_sheet_utc_column_count": 0,
+            "swing_high_nonblank_dip_field_count": 0,
+            "swing_low_nonblank_peak_field_count": 0,
+            "reference_ohlc_mismatch_count": 0,
+            "peak_price_mismatch_count": 0,
+            "dip_price_mismatch_count": 0,
+            "parameters_sheet_column_count": 2,
+            "hidden_result_column_count": 0,
+            "extra_result_column_count": 0,
+        }
     finally:
         normal.close()
         readonly.close()

@@ -178,20 +178,28 @@ class BodyTests(unittest.TestCase):
         self.assertFalse(any(item.open_row == 0 and item.direction == "SWING_HIGH" for item in result.raw))
         record = next(item for item in result.searches if item.open_row == 0 and item.direction == "SWING_HIGH")
         self.assertTrue(record.binding_failed)
-        self.assertIn(record.terminal, {"OPEN_BOUNDARY_BELOW_0_90", "BOTH_BOUNDARIES_BELOW_MINIMUM", "CLOSE_BOUNDARY_BELOW_0_90"})
+        self.assertIn(record.terminal, {"OPEN_BOUNDARY_BELOW_1_00", "BOTH_BOUNDARIES_BELOW_1_00", "CLOSE_BOUNDARY_BELOW_1_00"})
 
 
 class BoundaryTests(unittest.TestCase):
-    def test_minimum_is_inclusive_0_90_and_has_no_maximum(self) -> None:
+    def test_minimum_is_inclusive_1_00_and_has_no_maximum(self) -> None:
+        self.assertEqual(MIN_BOUNDARY, Decimal("1.00"))
         self.assertIsNone(MAX_BOUNDARY)
-        self.assertIsNone(boundary_reason(Decimal("0.90"), Decimal("0.90")))
-        self.assertEqual(boundary_reason(Decimal("0.89999999"), Decimal("0.89999999")), "BOTH_BOUNDARIES_BELOW_MINIMUM")
-        self.assertEqual(boundary_reason(Decimal("0.80"), Decimal("0.80")), "BOTH_BOUNDARIES_BELOW_MINIMUM")
+        self.assertEqual(boundary_reason(Decimal("0.89999999"), Decimal("1.30")), "OPEN_BOUNDARY_BELOW_1_00")
+        self.assertEqual(boundary_reason(Decimal("0.90000000"), Decimal("1.30")), "OPEN_BOUNDARY_BELOW_1_00")
+        self.assertEqual(boundary_reason(Decimal("0.99999999"), Decimal("1.30")), "OPEN_BOUNDARY_BELOW_1_00")
+        self.assertIsNone(boundary_reason(Decimal("1.00000000"), Decimal("1.00000000")))
+        self.assertIsNone(boundary_reason(Decimal("1.00000001"), Decimal("1.00000001")))
         self.assertIsNone(boundary_reason(Decimal("1.30"), Decimal("3.50")))
-        self.assertIsNone(boundary_reason(Decimal("5"), Decimal("10")))
-        self.assertEqual(boundary_reason(Decimal("0.89"), Decimal("2")), "OPEN_BOUNDARY_BELOW_0_90")
-        self.assertTrue(FORBIDDEN_TERMINALS.isdisjoint({"OPEN_BOUNDARY_BELOW_0_90", "BOTH_BOUNDARIES_BELOW_MINIMUM"}))
+        self.assertIsNone(boundary_reason(Decimal("3.50"), Decimal("5")))
+        self.assertEqual(boundary_reason(Decimal("0.89999999"), Decimal("0.89999999")), "BOTH_BOUNDARIES_BELOW_1_00")
+        self.assertEqual(boundary_reason(Decimal("0.90"), Decimal("0.90")), "BOTH_BOUNDARIES_BELOW_1_00")
+        self.assertEqual(boundary_reason(Decimal("1.30"), Decimal("0.99999999")), "CLOSE_BOUNDARY_BELOW_1_00")
+        self.assertIn("OPEN_BOUNDARY_BELOW_0_90", FORBIDDEN_TERMINALS)
+        self.assertIn("CLOSE_BOUNDARY_BELOW_0_90", FORBIDDEN_TERMINALS)
+        self.assertIn("BOTH_BOUNDARIES_BELOW_0_90", FORBIDDEN_TERMINALS)
         self.assertIn("BOUNDARY_ABOVE_MAXIMUM", FORBIDDEN_TERMINALS)
+        self.assertIn("MINIMAL_16_COLUMN_EXCEL_V12", CONFIGURATION_VERSION)
 
 
 class StructureTests(unittest.TestCase):
@@ -252,7 +260,7 @@ class WorkbookTests(unittest.TestCase):
             write_workbook(path, result)
             validation = validate_workbook(path, result)
             self.assertEqual(validation["sheets"], ["Special Swings", "Swing Highs", "Swing Lows", "Parameters"])
-            self.assertEqual(dict(USER_PARAMETERS)["Minimum Boundary Percent"], "0.90%")
+            self.assertEqual(dict(USER_PARAMETERS)["Minimum Boundary Percent"], "1.00%")
             self.assertEqual(dict(USER_PARAMETERS)["Minimum Interior Candles"], "6")
             self.assertEqual(dict(USER_PARAMETERS)["Maximum Interior Candles"], "9")
             self.assertEqual(dict(USER_PARAMETERS)["Minimum Total Formation Candles"], "8")
@@ -291,29 +299,42 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(dict(USER_PARAMETERS)["Missing Pair Rejects Swing"], "No")
             self.assertNotIn("Lowest Close Among Bearish Interior Candles", " ".join(value for _, value in USER_PARAMETERS))
             self.assertNotIn("0.80%", " ".join(value for _, value in USER_PARAMETERS))
-            self.assertEqual(len(RESULT_COLUMNS), 59)
-            self.assertEqual(RESULT_COLUMNS[7], "Swing Open Direction")
-            self.assertEqual(RESULT_COLUMNS[14], "Swing Close Direction")
-            self.assertEqual(RESULT_COLUMNS[19], "Earlier Swing Close Candidates Rejected By Reference Compatibility")
-            self.assertEqual(RESULT_COLUMNS[24], "Interior Body Reference Pair Type")
-            self.assertEqual(RESULT_COLUMNS[25], "Interior Body Reference Selection Rule")
-            self.assertEqual(RESULT_COLUMNS[29], "Interior Body Reference Open")
-            self.assertEqual(RESULT_COLUMNS[30], "Interior Body Reference High")
-            self.assertEqual(RESULT_COLUMNS[31], "Interior Body Reference Low")
-            self.assertEqual(RESULT_COLUMNS[32], "Interior Body Reference Close")
-            self.assertEqual(RESULT_COLUMNS[40], "Interior Body Reference Is Immediately Before Swing Close")
-            self.assertEqual(RESULT_COLUMNS[41], "Interior Body Reference Rows Before Swing Close")
-            self.assertEqual(RESULT_COLUMNS[42], "Reference To Swing Close Compatibility Status")
-            self.assertEqual(RESULT_COLUMNS[43], "Reference To Swing Close Margin")
-            self.assertEqual(RESULT_COLUMNS[44], "Reference To Swing Close Margin Percent")
-            self.assertEqual(RESULT_COLUMNS[45], "Reference To Validation Row Difference")
+            self.assertEqual(RESULT_COLUMNS, (
+                "Swing Type",
+                "Swing Open Open Time Turkey",
+                "Swing Close Open Time Turkey",
+                "Interior Body Reference Time Turkey",
+                "Interior Body Reference Open",
+                "Interior Body Reference High",
+                "Interior Body Reference Low",
+                "Interior Body Reference Close",
+                "Peak 1 Time Turkey",
+                "Peak 1 High",
+                "Peak 2 Time Turkey",
+                "Peak 2 High",
+                "Dip 1 Time Turkey",
+                "Dip 1 Low",
+                "Dip 2 Time Turkey",
+                "Dip 2 Low",
+            ))
+            self.assertEqual(len(RESULT_COLUMNS), 16)
+            self.assertEqual(validation["result_sheet_column_count"], 16)
+            self.assertEqual(validation["result_sheet_last_column"], "P")
+            self.assertEqual(validation["result_sheet_extra_column_count"], 0)
+            self.assertEqual(validation["result_sheet_hidden_column_count"], 0)
+            self.assertEqual(validation["parameters_sheet_column_count"], 2)
+            self.assertEqual(dict(USER_PARAMETERS)["Result Worksheet Column Count"], "16")
+            self.assertEqual(dict(USER_PARAMETERS)["Hidden Result Columns"], "None")
+            self.assertEqual(dict(USER_PARAMETERS)["Extra Result Columns"], "None")
             self.assertEqual(dict(USER_PARAMETERS)["Swing High Swing Open Direction"], "Bullish")
             self.assertEqual(dict(USER_PARAMETERS)["Swing High Swing Close Direction"], "Bearish")
             self.assertEqual(dict(USER_PARAMETERS)["Swing Low Swing Open Direction"], "Bearish")
             self.assertEqual(dict(USER_PARAMETERS)["Swing Low Swing Close Direction"], "Bullish")
             self.assertEqual(dict(USER_PARAMETERS)["Wrong-Direction Threshold Crossing Binds"], "No")
             self.assertEqual(dict(USER_PARAMETERS)["Search Continues After Wrong Direction"], "Yes, Within 6–9 Interior Horizon")
-            self.assertIn("Interior Body Reference Price", RESULT_COLUMNS)
+            self.assertNotIn("Swing ID", RESULT_COLUMNS)
+            self.assertNotIn("Open Boundary Percent", RESULT_COLUMNS)
+            self.assertFalse(any("UTC" in header for header in RESULT_COLUMNS))
             desktop = Path(folder)
             (desktop / "BTCUSDT_30M_Special_Swings_rev00.xlsx").write_bytes(b"x")
             (desktop / "BTCUSDT_30M_Special_Swings_rev02.xlsx").write_bytes(b"x")
@@ -825,7 +846,7 @@ class CompatibilityTests(unittest.TestCase):
         self.assertTrue(record.directionally_bound)
         self.assertEqual(record.compatibility_rejected, 0)
         self.assertEqual(record.evaluated_closes, 1)
-        self.assertEqual(record.terminal, "CLOSE_BOUNDARY_BELOW_0_90")
+        self.assertEqual(record.terminal, "CLOSE_BOUNDARY_BELOW_1_00")
         self.assertFalse(any(item.open_row == 0 and item.direction == "SWING_HIGH" for item in result.raw))
 
     def test_expanding_window_changes_the_selected_reference_before_binding(self) -> None:
@@ -905,6 +926,184 @@ class CompatibilityTests(unittest.TestCase):
             path = Path(folder) / "ohlc.xlsx"
             write_workbook(path, result)
             validate_workbook(path, result)
+
+
+class PeakDipTests(unittest.TestCase):
+    def _high(self, open_high="104", reference_high="112", validation_high="111", close_high="102.6") -> list[Bar]:
+        bars = _quiet(9)
+        bars[0] = _bar(0, "100", open_high, "99", "103")
+        bars[1] = _bar(1, "110", reference_high, "108", "109")
+        bars[2] = _bar(2, "109", validation_high, "108", "110")
+        bars[8] = _bar(8, "102.4", close_high, "101.5", "102")
+        return bars
+
+    def _low(self, open_low="99", reference_low="95", validation_low="90", close_low="99") -> list[Bar]:
+        bars = _quiet(8)
+        bars[0] = _bar(0, "103", "104", open_low, "100")
+        bars[1] = _bar(1, "100", "112", reference_low, "101")
+        bars[2] = _bar(2, "101", "102", validation_low, "100")
+        bars[7] = _bar(7, "100", "106", close_low, "105")
+        return bars
+
+    def test_swing_high_peak_segments_cover_the_formation_once(self) -> None:
+        bars = self._high(open_high="180", reference_high="112", validation_high="111", close_high="170")
+        high = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(high.peak_1_row, 0)
+        self.assertEqual(high.peak_1_price, Decimal("180"))
+        self.assertTrue(high.peak_1_owned_by_open)
+        self.assertFalse(high.peak_1_owned_by_reference)
+        self.assertEqual(high.peak_2_row, 8)
+        self.assertEqual(high.peak_2_price, Decimal("170"))
+        self.assertTrue(high.peak_2_owned_by_close)
+        self.assertFalse(high.peak_2_owned_by_validation)
+        self.assertEqual(high.peak_1_count, high.body_reference_row - high.open_row + 1)
+        self.assertEqual(high.peak_2_count, high.close_row - high.body_reference_validation_row + 1)
+        self.assertEqual(high.body_reference_validation_row, high.body_reference_row + 1)
+        covered = list(range(high.open_row, high.body_reference_row + 1)) + list(
+            range(high.body_reference_validation_row, high.close_row + 1)
+        )
+        self.assertEqual(covered, list(range(high.open_row, high.close_row + 1)))
+        self.assertEqual(len(covered), len(set(covered)))
+        self.assertNotEqual(high.peak_1_price, bars[0].close)
+        self.assertNotEqual(high.peak_1_price, bars[0].open)
+        self.assertNotEqual(high.peak_2_price, bars[8].close)
+        self.assertEqual(high.open_width_percent, (high.extreme_price - bars[0].open) / bars[0].open * Decimal(100))
+        self.assertNotEqual(high.extreme_price, high.peak_1_price)
+
+    def test_reference_and_validation_can_own_the_peaks(self) -> None:
+        high = next(item for item in analyze(self._high()).raw if item.direction == "SWING_HIGH" and item.open_row == 0)
+        self.assertEqual(high.peak_1_row, high.body_reference_row)
+        self.assertTrue(high.peak_1_owned_by_reference)
+        self.assertEqual(high.peak_1_price, Decimal("112"))
+        self.assertEqual(high.peak_2_row, high.body_reference_validation_row)
+        self.assertTrue(high.peak_2_owned_by_validation)
+        self.assertEqual(high.peak_2_price, Decimal("111"))
+
+    def test_exact_high_tie_selects_the_last_candle_and_ignores_rounding(self) -> None:
+        bars = self._high(open_high="112.000000001", reference_high="112.000000004")
+        high = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(high.peak_1_row, 1)
+        self.assertEqual(high.peak_1_price, Decimal("112.000000004"))
+        self.assertGreater(high.peak_1_tie_count, 0)
+        self.assertEqual(high.peak_1_tie_last, 1)
+        tied = self._high(open_high="150", reference_high="150")
+        tied_high = next(item for item in analyze(tied).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(tied_high.peak_1_tie_count, 2)
+        self.assertEqual(tied_high.peak_1_row, 1)
+        self.assertEqual(tied_high.peak_1_tie_first, 0)
+        self.assertEqual(tied_high.peak_1_plateau_start, 0)
+        self.assertEqual(tied_high.peak_1_plateau_end, 1)
+
+    def test_missing_pair_leaves_peaks_blank_and_later_data_does_not_repaint(self) -> None:
+        bars = _quiet(9)
+        bars[0] = _bar(0, "100", "104", "99", "103")
+        bars[4] = _bar(4, "100", "110", "99", "100")
+        bars[8] = _bar(8, "102", "102.2", "100", "101")
+        missing = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertIsNone(missing.body_reference_row)
+        self.assertEqual(missing.segment_status, "PEAK_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR")
+        self.assertIsNone(missing.peak_1_price)
+        self.assertIsNone(missing.peak_2_price)
+        self.assertIsNone(missing.peak_1_tie_count)
+        original = analyze(self._high())
+        first = next(item for item in original.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        extended = self._high() + [_bar(9, "100", "999", "1", "100")]
+        second = next(item for item in analyze(extended).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(first.peak_1_price, second.peak_1_price)
+        self.assertEqual(first.peak_2_price, second.peak_2_price)
+        self.assertEqual(first.peak_1_row, second.peak_1_row)
+        self.assertEqual(first.peak_2_row, second.peak_2_row)
+
+    def test_large_peak_does_not_replace_the_boundary_extremum(self) -> None:
+        bars = _quiet(9)
+        bars[0] = _bar(0, "100", "500", "99", "103")
+        bars[1] = _bar(1, "102", "102", "100.2", "101.2")
+        bars[2] = _bar(2, "100.4", "100.6", "100.3", "100.5")
+        bars[8] = _bar(8, "102", "102.2", "100", "101")
+        record = next(item for item in analyze(bars).searches if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertTrue(record.binding_failed)
+        self.assertIn(record.terminal, {"OPEN_BOUNDARY_BELOW_1_00", "BOTH_BOUNDARIES_BELOW_1_00", "CLOSE_BOUNDARY_BELOW_1_00"})
+        self.assertFalse(any(item.open_row == 0 and item.direction == "SWING_HIGH" for item in analyze(bars).raw))
+
+    def test_swing_low_dip_segments_and_ties(self) -> None:
+        owned_by_ends = self._low(open_low="70", reference_low="95", validation_low="90", close_low="60")
+        low = next(item for item in analyze(owned_by_ends).raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(low.dip_1_row, 0)
+        self.assertEqual(low.dip_1_price, Decimal("70"))
+        self.assertTrue(low.dip_1_owned_by_open)
+        self.assertFalse(low.dip_1_owned_by_reference)
+        self.assertEqual(low.dip_2_row, 7)
+        self.assertEqual(low.dip_2_price, Decimal("60"))
+        self.assertTrue(low.dip_2_owned_by_close)
+        self.assertFalse(low.dip_2_owned_by_validation)
+        self.assertEqual(low.dip_1_count + low.dip_2_count, low.close_row - low.open_row + 1)
+        self.assertEqual(low.body_reference_validation_row, low.body_reference_row + 1)
+        reference_owned = next(item for item in analyze(self._low()).raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(reference_owned.dip_1_row, reference_owned.body_reference_row)
+        self.assertTrue(reference_owned.dip_1_owned_by_reference)
+        self.assertEqual(reference_owned.dip_1_price, Decimal("95"))
+        self.assertEqual(reference_owned.dip_2_row, reference_owned.body_reference_validation_row)
+        self.assertTrue(reference_owned.dip_2_owned_by_validation)
+        self.assertEqual(reference_owned.dip_2_price, Decimal("90"))
+        self.assertNotEqual(reference_owned.dip_1_price, owned_by_ends[1].close)
+        self.assertNotEqual(reference_owned.dip_1_price, owned_by_ends[1].open)
+        tied = self._low(open_low="90", reference_low="90")
+        tied_low = next(item for item in analyze(tied).raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(tied_low.dip_1_tie_count, 2)
+        self.assertEqual(tied_low.dip_1_row, tied_low.body_reference_row)
+        self.assertEqual(tied_low.dip_1_price, Decimal("90"))
+        precise = self._low(open_low="90.000000001", reference_low="90.000000004")
+        precise_low = next(item for item in analyze(precise).raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(precise_low.dip_1_row, 0)
+        self.assertEqual(precise_low.dip_1_price, Decimal("90.000000001"))
+        self.assertNotEqual(precise_low.dip_1_price, Decimal("90.000000004"))
+        self.assertEqual(low.open_width_percent, (owned_by_ends[0].open - low.extreme_price) / owned_by_ends[0].open * Decimal(100))
+
+    def test_missing_dip_stays_blank_and_later_data_does_not_repaint(self) -> None:
+        bars = _quiet(8)
+        bars[0] = _bar(0, "103", "104", "90", "100")
+        bars[3] = _bar(3, "100", "101", "80", "100")
+        bars[7] = _bar(7, "100", "106", "99", "105")
+        missing = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertIsNone(missing.body_reference_row)
+        self.assertEqual(missing.segment_status, "DIP_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR")
+        self.assertIsNone(missing.dip_1_price)
+        self.assertIsNone(missing.dip_2_price)
+        first = next(item for item in analyze(self._low()).raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        extended = self._low() + [_bar(8, "100", "200", "1", "100")]
+        second = next(item for item in analyze(extended).raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(first.dip_1_price, second.dip_1_price)
+        self.assertEqual(first.dip_2_price, second.dip_2_price)
+        self.assertEqual(first.dip_1_row, second.dip_1_row)
+        self.assertEqual(first.dip_2_row, second.dip_2_row)
+
+    def test_primary_key_ignores_peak_and_dip_fields(self) -> None:
+        left = Swing(
+            "A", "", "SWING_HIGH", 0, 8, 3, Decimal("110"), 3, 3, "E", "",
+            Decimal("100"), Decimal("102"), 6, 8, Decimal("2"), Decimal("2"), Decimal("0.1"),
+            Decimal("110"), Decimal("90"), "PRIMARY", "PRIMARY", FORMATION_CLASS,
+            Decimal("100"), Decimal("103"), Decimal("3"), Decimal("102"), THIRD,
+            peak_1_price=Decimal("1"), dip_1_price=Decimal("9"),
+        )
+        right = Swing(
+            "A", "", "SWING_HIGH", 0, 8, 3, Decimal("110"), 3, 3, "E", "",
+            Decimal("100"), Decimal("102"), 6, 8, Decimal("2"), Decimal("2"), Decimal("0.1"),
+            Decimal("110"), Decimal("90"), "PRIMARY", "PRIMARY", FORMATION_CLASS,
+            Decimal("100"), Decimal("103"), Decimal("3"), Decimal("102"), THIRD,
+            peak_1_price=Decimal("999"), dip_2_price=Decimal("1"),
+        )
+        self.assertEqual(_primary_key(left), _primary_key(right))
+
+    def test_workbook_populates_only_the_matching_segment_side(self) -> None:
+        result = analyze(self._high())
+        low_result = analyze(self._low())
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "segments.xlsx"
+            write_workbook(path, result)
+            validate_workbook(path, result)
+            low_path = Path(folder) / "dips.xlsx"
+            write_workbook(low_path, low_result)
+            validate_workbook(low_path, low_result)
 
 
 if __name__ == "__main__":
