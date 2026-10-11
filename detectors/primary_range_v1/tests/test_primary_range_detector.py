@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -315,11 +316,9 @@ class DryRunDeterminismIsolationTests(unittest.TestCase):
             self.assertFalse(result["wrote_workbook"])
             self.assertEqual(before, after)
             self.assertTrue(str(result["intended_workbook"]).endswith("rev01.xlsx"))
-
-    def test_desktop_btc_next_is_rev06(self):
-        n = prv1.next_revision_number(Path(r"C:\Users\oranb\Desktop"), "BTCUSDT")
-        self.assertEqual(n, 6)
-        self.assertEqual(prv1.format_revision(n), "rev06")
+            self.assertEqual(result["initially_planned_revision"], "rev01")
+            self.assertEqual(result["discovered_revisions"], [])
+            self.assertIsNone(result["final_allocated_revision"])
 
     def test_determinism_synthetics(self):
         a = (prv1.synthetic_pair_test(), prv1.synthetic_width_tests(), prv1.synthetic_zero_additional_test())
@@ -364,6 +363,278 @@ class DryRunDeterminismIsolationTests(unittest.TestCase):
                 "Moderate Ranges", "Parameters", "Diagnostics", "README",
             ],
         )
+
+
+class DynamicRevisionAllocationTests(unittest.TestCase):
+    def _part(self, payload: bytes) -> Path:
+        handle = tempfile.NamedTemporaryFile(prefix="primary_range_v1_", suffix=".part.xlsx", delete=False)
+        handle.write(payload)
+        handle.close()
+        return Path(handle.name)
+
+    def _finalize(self, root: Path, payload: bytes, label: str) -> dict:
+        part = self._part(payload)
+        try:
+            return prv1.finalize_revisioned_workbook(
+                part,
+                root,
+                "BTCUSDT",
+                baked_revision=label,
+                initially_planned_revision=label,
+            )
+        finally:
+            if part.exists():
+                part.unlink()
+
+    def test_empty_directory_allocates_rev01(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(prv1.scan_existing_revisions(root, "BTCUSDT"), [])
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 1)
+            self.assertEqual(prv1.format_revision(1), "rev01")
+            self.assertEqual(
+                prv1.workbook_path_for(root, "BTCUSDT", 1).name,
+                "BTCUSDT_1H_Range_Detection_rev01.xlsx",
+            )
+
+    def test_existing_rev01_allocates_rev02(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "BTCUSDT_1H_Range_Detection_rev01.xlsx").write_bytes(b"keep")
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 2)
+            self.assertEqual(prv1.format_revision(2), "rev02")
+
+    def test_rev01_rev02_rev05_allocates_rev06_without_filling_gaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("rev01", "rev02", "rev05"):
+                (root / f"BTCUSDT_1H_Range_Detection_{name}.xlsx").write_bytes(name.encode())
+            self.assertEqual(prv1.scan_existing_revisions(root, "BTCUSDT"), [1, 2, 5])
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 6)
+            self.assertEqual(prv1.format_revision(6), "rev06")
+            self.assertFalse((root / "BTCUSDT_1H_Range_Detection_rev03.xlsx").exists())
+            self.assertFalse((root / "BTCUSDT_1H_Range_Detection_rev04.xlsx").exists())
+
+    def test_rev03_and_rev09_allocate_rev10(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "BTCUSDT_1H_Range_Detection_rev03.xlsx").write_bytes(b"a")
+            (root / "BTCUSDT_1H_Range_Detection_rev09.xlsx").write_bytes(b"b")
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 10)
+            self.assertEqual(prv1.format_revision(10), "rev10")
+
+    def test_revision_above_99_keeps_full_width(self):
+        self.assertEqual(prv1.format_revision(100), "rev100")
+        self.assertEqual(prv1.format_revision(101), "rev101")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "BTCUSDT_1H_Range_Detection_rev100.xlsx").write_bytes(b"wide")
+            self.assertEqual(prv1.scan_existing_revisions(root, "BTCUSDT"), [100])
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 101)
+            self.assertEqual(prv1.format_revision(101), "rev101")
+
+    def test_other_symbol_workbooks_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ETHUSDT_1H_Range_Detection_rev05.xlsx").write_bytes(b"eth")
+            (root / "ETHUSDT_1H_Range_Detection_rev09.xlsx").write_bytes(b"eth")
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 1)
+            self.assertEqual(prv1.scan_existing_revisions(root, "ETHUSDT"), [5, 9])
+
+    def test_unrelated_excel_files_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.xlsx").write_bytes(b"notes")
+            (root / "BTCUSDT_1H_Range_Detection.xlsx").write_bytes(b"plain")
+            (root / "BTCUSDT_15M_Range_Detection_rev08.xlsx").write_bytes(b"other-tf")
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 1)
+
+    def test_temporary_and_excel_lock_files_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "~$BTCUSDT_1H_Range_Detection_rev09.xlsx").write_bytes(b"lock")
+            (root / "BTCUSDT_1H_Range_Detection_rev04.xlsx.tmp").write_bytes(b"tmp")
+            (root / "BTCUSDT_1H_Range_Detection_rev04.xlsx.part").write_bytes(b"part")
+            (root / "BTCUSDT_1H_Range_Detection_rev04.tmp.xlsx").write_bytes(b"mid")
+            self.assertEqual(prv1.scan_existing_revisions(root, "BTCUSDT"), [])
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 1)
+
+    def test_similar_but_invalid_filenames_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "BTCUSDT_1H_Range_Detection_rev1.xlsx").write_bytes(b"one-digit")
+            (root / "BTCUSDT_1H_Range_Detection_rev01_copy.xlsx").write_bytes(b"copy")
+            (root / "BTCUSDT_1H_Range_Detection_revision01.xlsx").write_bytes(b"word")
+            (root / "BTCUSDT_1H_Range_Detection_rev01.xlsx.bak").write_bytes(b"bak")
+            self.assertEqual(prv1.scan_existing_revisions(root, "BTCUSDT"), [])
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 1)
+
+    def test_matching_is_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "btcusdt_1h_range_detection_rev02.xlsx").write_bytes(b"lower")
+            (root / "BTCUSDT_1H_RANGE_DETECTION_REV09.XLSX").write_bytes(b"upper")
+            self.assertEqual(prv1.scan_existing_revisions(root, "BTCUSDT"), [2, 9])
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 10)
+            self.assertEqual(prv1.format_revision(10), "rev10")
+
+    def test_existing_workbook_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = root / "BTCUSDT_1H_Range_Detection_rev01.xlsx"
+            existing.write_bytes(b"original")
+            result = self._finalize(root, b"second-run", "rev02")
+            self.assertEqual(existing.read_bytes(), b"original")
+            self.assertEqual(result["final_allocated_revision"], "rev02")
+            self.assertEqual(Path(result["workbook_path"]).read_bytes(), b"second-run")
+
+    def test_filename_appearing_after_planning_reallocates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _number, label, planned = prv1.allocate_output_path(root, "BTCUSDT")
+            self.assertEqual(label, "rev01")
+            planned.write_bytes(b"appeared-later")
+            result = self._finalize(root, b"this-run", label)
+            self.assertEqual(result["initially_planned_revision"], "rev01")
+            self.assertEqual(result["discovered_revisions"], ["rev01"])
+            self.assertEqual(result["final_allocated_revision"], "rev02")
+            self.assertEqual(planned.read_bytes(), b"appeared-later")
+            self.assertEqual(Path(result["workbook_path"]).read_bytes(), b"this-run")
+
+    def test_destination_created_during_rename_retries_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            part = self._part(b"new-run")
+            real_rename = prv1.os.rename
+            calls = {"n": 0}
+
+            def racing(src, dst):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    Path(dst).write_bytes(b"racer")
+                    raise FileExistsError(dst)
+                return real_rename(src, dst)
+
+            prv1.os.rename = racing
+            try:
+                result = prv1.finalize_revisioned_workbook(
+                    part,
+                    root,
+                    "BTCUSDT",
+                    baked_revision="rev01",
+                    initially_planned_revision="rev01",
+                )
+            finally:
+                prv1.os.rename = real_rename
+                if part.exists():
+                    part.unlink()
+            earlier = root / "BTCUSDT_1H_Range_Detection_rev01.xlsx"
+            self.assertEqual(earlier.read_bytes(), b"racer")
+            self.assertEqual(result["final_allocated_revision"], "rev02")
+            self.assertEqual(Path(result["workbook_path"]).read_bytes(), b"new-run")
+            self.assertGreaterEqual(calls["n"], 2)
+
+    def test_allocation_is_deterministic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "BTCUSDT_1H_Range_Detection_rev09.xlsx").write_bytes(b"b")
+            (root / "BTCUSDT_1H_Range_Detection_rev03.xlsx").write_bytes(b"a")
+            first = prv1.scan_existing_revisions(root, "BTCUSDT")
+            second = prv1.scan_existing_revisions(root, "BTCUSDT")
+            self.assertEqual(first, [3, 9])
+            self.assertEqual(second, first)
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 10)
+            self.assertEqual(prv1.next_revision_number(root, "BTCUSDT"), 10)
+
+    def test_validated_symbol_is_escaped_in_the_pattern(self):
+        symbol = prv1.validate_symbol("btcusdt")
+        self.assertEqual(symbol, "BTCUSDT")
+        pattern = prv1.revision_filename_pattern(symbol)
+        self.assertIn(re.escape(symbol), pattern.pattern)
+        self.assertEqual(pattern.pattern, r"^BTCUSDT_1H_Range_Detection_rev(\d{2,})\.xlsx$")
+        self.assertTrue(pattern.flags & re.IGNORECASE)
+        special = prv1.revision_filename_pattern("BTC.USDT")
+        self.assertIsNone(special.fullmatch("BTCXUSDT_1H_Range_Detection_rev01.xlsx"))
+        self.assertIsNotNone(special.fullmatch("BTC.USDT_1H_Range_Detection_rev01.xlsx"))
+        with tempfile.TemporaryDirectory() as tmp:
+            _number, label, path = prv1.allocate_output_path(Path(tmp), symbol)
+            self.assertEqual(label, "rev01")
+            self.assertEqual(path.name, "BTCUSDT_1H_Range_Detection_rev01.xlsx")
+
+    def test_revision_unit_tests_do_not_reference_the_real_desktop(self):
+        source = Path(__file__).read_text(encoding="utf-8")
+        self.assertNotIn(str(Path.home() / "Desktop"), source)
+
+    def test_atomic_finalization_preserves_earlier_workbooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            earlier = {
+                "BTCUSDT_1H_Range_Detection_rev01.xlsx": b"first",
+                "BTCUSDT_1H_Range_Detection_rev02.xlsx": b"second",
+            }
+            for name, payload in earlier.items():
+                (root / name).write_bytes(payload)
+            result = self._finalize(root, b"third", "rev03")
+            self.assertEqual(result["final_allocated_revision"], "rev03")
+            for name, payload in earlier.items():
+                self.assertEqual((root / name).read_bytes(), payload)
+            self.assertEqual(Path(result["workbook_path"]).read_bytes(), b"third")
+
+    def test_sequential_runs_allocate_consecutive_revisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            written = []
+            for expected, payload in (("rev01", b"one"), ("rev02", b"two"), ("rev03", b"three")):
+                _number, label, _planned = prv1.allocate_output_path(root, "BTCUSDT")
+                self.assertEqual(label, expected)
+                result = self._finalize(root, payload, label)
+                self.assertEqual(result["final_allocated_revision"], expected)
+                written.append((Path(result["workbook_path"]), payload))
+            for path, payload in written:
+                self.assertEqual(path.read_bytes(), payload)
+            self.assertEqual(prv1.scan_existing_revisions(root, "BTCUSDT"), [1, 2, 3])
+
+    def test_reallocation_stamp_keeps_initial_plan_and_updates_final(self):
+        from openpyxl import Workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Diagnostics"
+            sheet.append(["Diagnostic", "Value", "Notes"])
+            sheet.append(["Initially planned revision", "rev01", ""])
+            sheet.append(["Final allocated revision", "rev01", ""])
+            sheet.append(["Discovered revisions", "none", ""])
+            sheet.append(["output_revision", "rev01", ""])
+            sheet.append(["workbook path", "old", ""])
+            part = root / "pending.part.xlsx"
+            workbook.save(part)
+            workbook.close()
+            (root / "BTCUSDT_1H_Range_Detection_rev01.xlsx").write_bytes(b"occupied")
+
+            def stamp(temp_workbook, label, intended_path, discovered_numbers):
+                labels = [prv1.format_revision(n) for n in discovered_numbers]
+                prv1._stamp_output_revision(temp_workbook, label, str(intended_path), labels)
+
+            result = prv1.finalize_revisioned_workbook(
+                part,
+                root,
+                "BTCUSDT",
+                baked_revision="rev01",
+                initially_planned_revision="rev01",
+                baked_discovered=["none-placeholder"],
+                on_reallocate=stamp,
+            )
+            saved = prv1.load_workbook(result["workbook_path"])
+            values = {saved.active.cell(row, 1).value: saved.active.cell(row, 2).value for row in range(2, 7)}
+            saved.close()
+            self.assertEqual(values["Initially planned revision"], "rev01")
+            self.assertEqual(values["Final allocated revision"], "rev02")
+            self.assertEqual(values["Discovered revisions"], "rev01")
+            self.assertEqual(values["output_revision"], "rev02")
+            self.assertTrue(str(values["workbook path"]).endswith("BTCUSDT_1H_Range_Detection_rev02.xlsx"))
+            self.assertEqual((root / "BTCUSDT_1H_Range_Detection_rev01.xlsx").read_bytes(), b"occupied")
 
 
 if __name__ == "__main__":

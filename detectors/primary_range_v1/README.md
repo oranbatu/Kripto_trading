@@ -32,7 +32,7 @@ Pass the **exact** perpetual symbol (`BTCUSDT`, not `BTC` or `ETH`).
 | Configuration version | `PRIMARY_RANGE_CONFIG_REV05` | Hard filters and PRIMARY-only reporting |
 | Output revision | `revNN` allocated per symbol | Desktop workbook counter, not an algorithm change |
 
-Existing desktop files such as `BTCUSDT_1H_Range_Detection_rev05.xlsx` are never overwritten. The next BTCUSDT file is `rev06` if `rev05` is the highest matching revision.
+Existing matching desktop workbooks are never overwritten. The next file is `rev01` when no exact `<SYMBOL>_1H_Range_Detection_revNN.xlsx` match exists. Otherwise it is one higher than the highest numeric revision (`rev09` is followed by `rev10`), and gaps are left empty.
 
 ## Source
 

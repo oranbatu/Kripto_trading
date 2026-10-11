@@ -218,7 +218,11 @@ def derived_1h_symbol_root(data_root: Path, symbol: str) -> Path:
 
 
 def revision_filename_pattern(symbol: str) -> re.Pattern[str]:
-    return re.compile(rf"^{re.escape(symbol)}_1H_Range_Detection_rev([0-9]+)\.xlsx$", re.IGNORECASE)
+    """Exact `<SYMBOL>_1H_Range_Detection_revNN.xlsx` match. NN is at least two digits."""
+    return re.compile(
+        rf"^{re.escape(symbol)}_1H_Range_Detection_rev(\d{{2,}})\.xlsx$",
+        re.IGNORECASE,
+    )
 
 
 def is_ignored_output_file(path: Path) -> bool:
@@ -240,8 +244,10 @@ def format_revision(revision_number: int) -> str:
 
 
 def scan_existing_revisions(output_dir: Path, symbol: str) -> list[int]:
+    """Return sorted unique revision numbers for exact symbol workbooks in one directory."""
     pat = revision_filename_pattern(symbol)
     found: list[int] = []
+    output_dir = Path(output_dir)
     if not output_dir.is_dir():
         return found
     for path in output_dir.iterdir():
@@ -252,7 +258,7 @@ def scan_existing_revisions(output_dir: Path, symbol: str) -> list[int]:
         match = pat.fullmatch(path.name)
         if match:
             found.append(int(match.group(1), 10))
-    return found
+    return sorted(set(found))
 
 
 def next_revision_number(output_dir: Path, symbol: str) -> int:
@@ -265,6 +271,7 @@ def workbook_path_for(output_dir: Path, symbol: str, revision_number: int) -> Pa
 
 
 def allocate_output_path(output_dir: Path, symbol: str) -> tuple[int, str, Path]:
+    """Allocate highest existing revision + 1. Never returns a path that already exists."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     n = next_revision_number(output_dir, symbol)
@@ -273,6 +280,68 @@ def allocate_output_path(output_dir: Path, symbol: str) -> tuple[int, str, Path]
         n += 1
         path = workbook_path_for(output_dir, symbol, n)
     return n, format_revision(n), path
+
+
+def finalize_revisioned_workbook(
+    temp_path: Path,
+    output_dir: Path,
+    symbol: str,
+    *,
+    baked_revision: str,
+    initially_planned_revision: str,
+    baked_discovered: list[str] | None = None,
+    on_reallocate=None,
+    max_attempts: int = 32,
+) -> dict:
+    """Move a validated temp workbook onto the next free revision.
+
+    The output directory is rescanned immediately before every attempt.
+    An existing destination is left untouched. os.rename is used because it
+    does not replace an existing file on Windows.
+    """
+    symbol = validate_symbol(symbol)
+    output_dir = Path(output_dir)
+    temp_path = Path(temp_path)
+    if not temp_path.is_file():
+        raise PrimaryRangeDetectorError(f"temporary workbook missing: {temp_path}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    committed: Path | None = None
+    last_error: Exception | None = None
+    current_label = baked_revision
+    discovered_numbers: list[int] = []
+    intended: Path | None = None
+    for _attempt in range(max_attempts):
+        discovered_numbers = scan_existing_revisions(output_dir, symbol)
+        discovered_labels = [format_revision(n) for n in discovered_numbers]
+        _number, current_label, intended = allocate_output_path(output_dir, symbol)
+        revision_changed = current_label != baked_revision
+        discovery_changed = baked_discovered is not None and discovered_labels != list(baked_discovered)
+        if revision_changed or discovery_changed:
+            if on_reallocate is not None:
+                on_reallocate(temp_path, current_label, intended, discovered_numbers)
+            baked_revision = current_label
+            baked_discovered = discovered_labels
+        try:
+            os.rename(temp_path, intended)
+            committed = intended
+            break
+        except FileExistsError as exc:
+            last_error = exc
+            continue
+        except OSError as exc:
+            last_error = exc
+            if intended.exists():
+                continue
+            raise
+    if committed is None:
+        raise PrimaryRangeDetectorError(f"failed to commit workbook without overwrite: {last_error}")
+    return {
+        "discovered_revision_numbers": list(discovered_numbers),
+        "discovered_revisions": [format_revision(n) for n in discovered_numbers],
+        "initially_planned_revision": initially_planned_revision,
+        "final_allocated_revision": current_label,
+        "workbook_path": str(committed.resolve()),
+    }
 
 
 def fingerprint_unrelated_project_code() -> list[dict]:
@@ -1695,7 +1764,9 @@ def row_detail(r: RangeRec) -> list:
     ]
 
 
-def _stamp_output_revision(path: Path, revision: str, workbook_path: str) -> None:
+def _stamp_output_revision(path: Path, revision: str, workbook_path: str, discovered_revisions: list[str] | None = None) -> None:
+    """Update the committed revision fields. The initially planned revision stays as first recorded."""
+    discovered_text = "none" if not discovered_revisions else ", ".join(discovered_revisions)
     wb = load_workbook(path)
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -1710,10 +1781,12 @@ def _stamp_output_revision(path: Path, revision: str, workbook_path: str) -> Non
                 ws.cell(r, col).value = revision
         for r in range(2, ws.max_row + 1):
             key = str(ws.cell(r, 1).value or "").strip().lower()
-            if key in {"output revision", "output_revision"}:
+            if key in {"output revision", "output_revision", "final allocated revision"}:
                 ws.cell(r, 2).value = revision
             elif key in {"workbook path", "output_path"}:
                 ws.cell(r, 2).value = workbook_path
+            elif key == "discovered revisions" and discovered_revisions is not None:
+                ws.cell(r, 2).value = discovered_text
     wb.save(path)
     wb.close()
 
@@ -1898,7 +1971,7 @@ def build_workbook(hq, mod, all_q, diag, integrity, fps_after, created, synth, w
         ("Duration score", "min(bars/168,1)", "Hard filter remains 500 bars", U),
         ("Quality formula", "100*(0.30*cont+0.20*touch+0.15*osc+0.15*flat+0.10*dur+0.10*bound)", "Hierarchy does not alter the numeric score", U),
         ("Detector version", DETECTOR_VERSION, "PRIMARY-only; 500/2+2 any-pair-30/ICR 0.97/width<=13; additional touches descriptive", R),
-        ("Revision allocation rule", "Scan ^SYMBOL_1H_Range_Detection_rev([0-9]+).xlsx$; next = max existing + 1; rev01 if none; never fill gaps; never overwrite", "Output revision is not the algorithm version", R),
+        ("Revision allocation rule", "Scan ^SYMBOL_1H_Range_Detection_rev(\\d{2,}).xlsx$ case-insensitively after escaping the validated symbol; next = highest existing + 1; rev01 if none; at least two digits; never fill gaps; rescan immediately before commit; never overwrite", "Output revision is not the algorithm version", R),
     ]
     ws6 = wb.create_sheet("Parameters")
     write_kv_sheet(ws6, ["Parameter", "Value", "Explanation", "Revision Status"], params, "tblPrimaryRangeV1Parameters", {3})
@@ -1998,6 +2071,9 @@ def build_workbook(hq, mod, all_q, diag, integrity, fps_after, created, synth, w
         ("Source immutability result", fps_after.get("source", "UNCHECKED"), ""),
         ("Original workbook immutability result", fps_after.get("original_wb", "UNCHECKED"), ""),
         ("Previous revision workbook immutability result", fps_after.get("previous_wbs", "UNCHECKED"), ""),
+        ("Discovered revisions", ", ".join(meta.get("discovered_revisions") or []) or "none", "Exact matching workbooks present on the rescan immediately before final allocation"),
+        ("Initially planned revision", meta.get("initially_planned_revision", ""), "Revision selected when this run first planned its workbook"),
+        ("Final allocated revision", meta.get("final_allocated_revision", meta.get("output_revision", "")), "Revision committed after the pre-write rescan. An occupied name is not replaced."),
         ("Existing code immutability result", fps_after.get("code", "UNCHECKED"), ""),
         ("Temporary-artifact cleanup result", fps_after.get("temp_cleanup", "PENDING"), "Workbook written to OS temp, validated, then atomically committed"),
         ("Synthetic pair test", "PASS" if synth["ok"] else "FAIL", str(synth)),
@@ -2358,7 +2434,10 @@ def run_primary_range_detector(
     print("SYNTHETIC_WIDTH_TEST", width_synth, flush=True)
     print("SYNTHETIC_ZERO_ADDITIONAL_TEST", extra_synth, flush=True)
     inventory = inspect_source_inventory(data_root, symbol)
+    discovered_at_start = scan_existing_revisions(output_dir, symbol)
+    discovered_at_start_labels = [format_revision(n) for n in discovered_at_start]
     rev_n, rev_label, intended = allocate_output_path(output_dir, symbol)
+    initially_planned_revision = rev_label
     thresholds = active_thresholds()
     if dry_run:
         result = {
@@ -2373,6 +2452,9 @@ def run_primary_range_detector(
             "coverage_end_exclusive": iso_z(inventory["range_end_exclusive"]),
             "intended_workbook": str(intended),
             "allocated_output_revision": rev_label,
+            "discovered_revisions": discovered_at_start_labels,
+            "initially_planned_revision": initially_planned_revision,
+            "final_allocated_revision": None,
             "detector_version": DETECTOR_VERSION,
             "configuration_version": CONFIGURATION_VERSION,
             "hierarchy_classification_mode": HIERARCHY_MODE,
@@ -2450,6 +2532,7 @@ def run_primary_range_detector(
     if primary_scored and len(DETAIL_COLS) != len(row_detail(primary_scored[0])):
         raise RuntimeError(f"DETAIL_COLS mismatch {len(DETAIL_COLS)} {len(row_detail(primary_scored[0]))}")
 
+    discovered_before_build = scan_existing_revisions(output_dir, symbol)
     rev_n, rev_label, intended = allocate_output_path(output_dir, symbol)
     annotate_ranges(
         primary_scored, symbol=symbol, output_revision=rev_label,
@@ -2465,6 +2548,9 @@ def run_primary_range_detector(
         "script_sha256": script_hash,
         "run_id": run_id,
         "temp_path": str(tmp_path),
+        "discovered_revisions": [format_revision(n) for n in discovered_before_build],
+        "initially_planned_revision": initially_planned_revision,
+        "final_allocated_revision": rev_label,
     }
     prev_after_ok = all(fingerprint(Path(p)) == fp for p, fp in prev_before.items())
     fps_after = {
@@ -2482,35 +2568,36 @@ def run_primary_range_detector(
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise PrimaryRangeDetectorError("temporary workbook validation failed: " + "; ".join(errs))
 
-    committed = None
-    last_error = None
-    for _attempt in range(32):
-        if intended.exists():
-            rev_n, rev_label, intended = allocate_output_path(output_dir, symbol)
-            meta["workbook_path"] = str(intended)
-            meta["output_revision"] = rev_label
-            for r in primary_scored:
-                r.output_revision = rev_label
-            _stamp_output_revision(tmp_path, rev_label, str(intended))
-        try:
-            os.rename(tmp_path, intended)
-            committed = intended
-            break
-        except FileExistsError as exc:
-            last_error = exc
-            continue
-        except OSError as exc:
-            last_error = exc
-            if intended.exists():
-                continue
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            raise
-    if committed is None:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise PrimaryRangeDetectorError(f"failed to commit workbook without overwrite: {last_error}")
+    def _on_reallocate(temp_workbook: Path, label: str, intended_path: Path, discovered_numbers: list[int]) -> None:
+        labels = [format_revision(n) for n in discovered_numbers]
+        meta["workbook_path"] = str(intended_path)
+        meta["output_revision"] = label
+        meta["final_allocated_revision"] = label
+        meta["discovered_revisions"] = labels
+        for row in primary_scored:
+            row.output_revision = label
+        _stamp_output_revision(temp_workbook, label, str(intended_path), labels)
 
+    try:
+        finalized = finalize_revisioned_workbook(
+            tmp_path,
+            output_dir,
+            symbol,
+            baked_revision=rev_label,
+            initially_planned_revision=initially_planned_revision,
+            baked_discovered=list(meta["discovered_revisions"]),
+            on_reallocate=_on_reallocate,
+        )
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    rev_label = finalized["final_allocated_revision"]
+    committed = Path(finalized["workbook_path"])
     meta["workbook_path"] = str(committed)
     meta["output_revision"] = rev_label
+    meta["final_allocated_revision"] = rev_label
+    meta["discovered_revisions"] = list(finalized["discovered_revisions"])
     for r in primary_scored:
         r.output_revision = rev_label
 
@@ -2544,6 +2631,10 @@ def run_primary_range_detector(
         "detector_version": DETECTOR_VERSION,
         "configuration_version": CONFIGURATION_VERSION,
         "output_revision": rev_label,
+        "discovered_revisions": list(finalized["discovered_revisions"]),
+        "discovered_revisions_at_start": discovered_at_start_labels,
+        "initially_planned_revision": initially_planned_revision,
+        "final_allocated_revision": rev_label,
         "symbol": symbol,
         "timeframe": TIMEFRAME,
         "dataset_root": integrity["dataset_root"],
