@@ -25,10 +25,15 @@ from detectors.swing_open_close_30m_special_v1.config import (
     MIN_TOTAL,
     NESTED,
     PRIMARY,
-    REQUIRED_FRACTION,
+    REQUIRED_BODY_PENETRATION_MAX_RATIO,
+    REQUIRED_BODY_PENETRATION_MIN_RATIO,
     STANDARD_ENABLED,
     SWING_HIGH,
+    SWING_HIGH_BOUNDARY_EXTREME_FIELD,
+    SWING_HIGH_REQUIRE_REFERENCE_LOW_GTE_SWING_CLOSE_CLOSE,
     SWING_LOW,
+    SWING_LOW_BOUNDARY_EXTREME_FIELD,
+    SWING_LOW_REQUIRE_REFERENCE_HIGH_LTE_SWING_CLOSE_CLOSE,
     ZERO_INTERIOR_ENABLED,
 )
 
@@ -191,6 +196,7 @@ class SearchRecord:
     exhausted_after_only_compatibility_failures: bool = False
     duration_counts: dict = field(default_factory=dict)
     compatibility_audit: list = field(default_factory=list)
+    penetration_rejections: list = field(default_factory=list)
 
 
 @dataclass
@@ -229,9 +235,15 @@ def swing_open_body(open_price: Decimal, open_close: Decimal) -> tuple[Decimal, 
 
 
 def body_threshold(direction: str, body_low: Decimal, body_high: Decimal, body_size: Decimal) -> Decimal:
+    """Close price at the configured inclusive minimum penetration edge."""
+    half = (
+        body_size
+        * Decimal(REQUIRED_BODY_PENETRATION_MIN_RATIO.numerator)
+        / Decimal(REQUIRED_BODY_PENETRATION_MIN_RATIO.denominator)
+    )
     if direction == SWING_HIGH:
-        return body_high - (body_size * REQUIRED_FRACTION)
-    return body_low + (body_size * REQUIRED_FRACTION)
+        return body_high - half
+    return body_low + half
 
 
 def body_penetrated(direction: str, close_price: Decimal, threshold: Decimal) -> bool:
@@ -240,10 +252,40 @@ def body_penetrated(direction: str, close_price: Decimal, threshold: Decimal) ->
     return close_price >= threshold
 
 
-def reference_to_close_margin(direction: str, reference_close: Decimal, swing_close: Decimal) -> Decimal:
+def penetration_rejection(
+    direction: str,
+    close_price: Decimal,
+    body_low: Decimal,
+    body_high: Decimal,
+    body_size: Decimal,
+) -> str | None:
+    """Inclusive configured penetration interval, decided by cross-multiplication."""
+    if body_size <= 0:
+        return "SWING_OPEN_BODY_SIZE_ZERO"
+    price = body_high - close_price if direction == SWING_HIGH else close_price - body_low
+    if price < 0:
+        return "PENETRATION_WRONG_DIRECTION"
+    if price * REQUIRED_BODY_PENETRATION_MIN_RATIO.denominator < body_size * REQUIRED_BODY_PENETRATION_MIN_RATIO.numerator:
+        return "BODY_PENETRATION_BELOW_MINIMUM"
+    if price * REQUIRED_BODY_PENETRATION_MAX_RATIO.denominator > body_size * REQUIRED_BODY_PENETRATION_MAX_RATIO.numerator:
+        return "BODY_PENETRATION_ABOVE_MAXIMUM"
+    return None
+
+
+def reference_compatibility_margin(
+    direction: str,
+    reference_low: Decimal,
+    reference_high: Decimal,
+    swing_close: Decimal,
+) -> Decimal:
+    """Wick compatibility. A negative result fails and the search continues."""
     if direction == SWING_HIGH:
-        return reference_close - swing_close
-    return swing_close - reference_close
+        if not SWING_HIGH_REQUIRE_REFERENCE_LOW_GTE_SWING_CLOSE_CLOSE:
+            raise SpecialSwingError("swing high reference-low compatibility is disabled")
+        return reference_low - swing_close
+    if not SWING_LOW_REQUIRE_REFERENCE_HIGH_LTE_SWING_CLOSE_CLOSE:
+        raise SpecialSwingError("swing low reference-high compatibility is disabled")
+    return swing_close - reference_high
 
 
 def penetration_fraction(direction: str, close_price: Decimal, body_low: Decimal, body_high: Decimal, body_size: Decimal) -> Decimal:
@@ -280,8 +322,10 @@ def analyze(bars: Sequence[Bar]) -> Analysis:
         raise SpecialSwingError("interior window is not 6 through 9")
     if FIRST_CLOSE_OFFSET != 7 or LAST_CLOSE_OFFSET != 10:
         raise SpecialSwingError("close offsets are not open_row + 7 through open_row + 10")
-    if CONFIGURATION_VERSION != "STANDARD_6_TO_9_PEAK_DIP_BOUNDARY_1_00_MINIMAL_16_COLUMN_EXCEL_V12":
+    if CONFIGURATION_VERSION != "STANDARD_6_TO_9_PEAK_DIP_WICK_BOUNDARY_1_00_PENETRATION_1_3_TO_5_3_REFERENCE_LOW_HIGH_COMPATIBILITY_MINIMAL_16_COLUMN_EXCEL_V16":
         raise SpecialSwingError("configuration version mismatch")
+    if not SWING_HIGH_REQUIRE_REFERENCE_LOW_GTE_SWING_CLOSE_CLOSE or not SWING_LOW_REQUIRE_REFERENCE_HIGH_LTE_SWING_CLOSE_CLOSE:
+        raise SpecialSwingError("reference wick compatibility is disabled")
     if not bars:
         raise SpecialSwingError("at least one candle is required")
     searches: list[SearchRecord] = []
@@ -313,7 +357,7 @@ def _search(bars: Sequence[Bar], open_row: int, direction: str) -> tuple[SearchR
     _body_low, _body_high, body_size = swing_open_body(opened.open, opened.close)
     required_close = "BEARISH" if direction == SWING_HIGH else "BULLISH"
     if body_size == 0:
-        return SearchRecord(open_row, direction, "SWING_OPEN_BODY_ZERO", 0, False, open_rejected=True), None
+        return SearchRecord(open_row, direction, "SWING_OPEN_BODY_SIZE_ZERO", 0, False, open_rejected=True), None
     if direction == SWING_HIGH and candle_direction(opened.open, opened.close) != "BULLISH":
         return SearchRecord(open_row, direction, "SWING_HIGH_OPEN_NOT_BULLISH", 0, False, open_rejected=True), None
     if direction == SWING_LOW and candle_direction(opened.open, opened.close) != "BEARISH":
@@ -345,6 +389,7 @@ def _search(bars: Sequence[Bar], open_row: int, direction: str) -> tuple[SearchR
     last_failure_row = None
     duration_counts: dict[int, int] = {}
     audit: list[dict] = []
+    penetration_rejections: list[str] = []
 
     def finish(terminal: str, censored: bool, binding_failed: bool, bound: bool, swing: Swing | None):
         return SearchRecord(
@@ -380,6 +425,7 @@ def _search(bars: Sequence[Bar], open_row: int, direction: str) -> tuple[SearchR
             ),
             duration_counts=dict(duration_counts),
             compatibility_audit=list(audit),
+            penetration_rejections=list(penetration_rejections),
         ), swing
 
     for close_row in range(first, last + 1):
@@ -395,11 +441,17 @@ def _search(bars: Sequence[Bar], open_row: int, direction: str) -> tuple[SearchR
         close_label = candle_direction(candle.open, candle.close)
         if close_label == required_close:
             directional += 1
-        threshold = body_threshold(direction, *_body(opened))
-        if not body_penetrated(direction, candle.close, threshold):
+        body_low, body_high, sized = _body(opened)
+        rejection = penetration_rejection(direction, candle.close, body_low, body_high, sized)
+        if rejection in {"BODY_PENETRATION_BELOW_MINIMUM", "PENETRATION_WRONG_DIRECTION"}:
+            threshold = body_threshold(direction, body_low, body_high, sized)
             wick = candle.low <= threshold if direction == SWING_HIGH else candle.high >= threshold
             if wick:
                 wick_only += 1
+            penetration_rejections.append(rejection)
+            continue
+        if rejection is not None:
+            penetration_rejections.append(rejection)
             continue
         if close_label != required_close:
             wrong_direction += 1
@@ -424,15 +476,17 @@ def _search(bars: Sequence[Bar], open_row: int, direction: str) -> tuple[SearchR
             })
         else:
             compatibility_evaluated += 1
-            margin = reference_to_close_margin(direction, provisional["price"], candle.close)
+            margin = reference_compatibility_margin(
+                direction, provisional["low"], provisional["high"], candle.close
+            )
             if margin < 0:
                 compatibility_rejected += 1
                 if direction == SWING_HIGH:
                     high_below += 1
-                    code = "REFERENCE_CLOSE_BELOW_SWING_CLOSE_FOR_SWING_HIGH"
+                    code = "SWING_HIGH_REFERENCE_LOW_BELOW_SWING_CLOSE_CLOSE"
                 else:
                     low_above += 1
-                    code = "REFERENCE_CLOSE_ABOVE_SWING_CLOSE_FOR_SWING_LOW"
+                    code = "SWING_LOW_REFERENCE_HIGH_ABOVE_SWING_CLOSE_CLOSE"
                 if first_failure_row is None:
                     first_failure_row = close_row
                 last_failure_row = close_row
@@ -443,6 +497,8 @@ def _search(bars: Sequence[Bar], open_row: int, direction: str) -> tuple[SearchR
                     "continuation": "REFERENCE_COMPATIBILITY_FAIL_CONTINUE_SEARCH",
                     "reference_row": provisional["row"],
                     "reference_price": provisional["price"],
+                    "reference_low": provisional["low"],
+                    "reference_high": provisional["high"],
                     "eligible_count": provisional["eligible_count"],
                     "recomputed": True,
                 })
@@ -457,6 +513,8 @@ def _search(bars: Sequence[Bar], open_row: int, direction: str) -> tuple[SearchR
                 "status": "PASS",
                 "reference_row": provisional["row"],
                 "reference_price": provisional["price"],
+                "reference_low": provisional["low"],
+                "reference_high": provisional["high"],
                 "eligible_count": provisional["eligible_count"],
                 "recomputed": True,
             })
@@ -555,6 +613,8 @@ def select_interior_body_reference(
         "tie_last": None,
         "matches_extremum": None,
         "distance": None,
+        "low": None,
+        "high": None,
         "successor_not_interior": successor_not_interior,
         "successor_wrong_direction": successor_wrong_direction,
         "pre_close_excluded": pre_close_excluded,
@@ -599,6 +659,8 @@ def select_interior_body_reference(
         "tie_last": chosen,
         "matches_extremum": chosen == extreme_row,
         "distance": distance,
+        "low": bars[chosen].low,
+        "high": bars[chosen].high,
         "successor_not_interior": successor_not_interior,
         "successor_wrong_direction": successor_wrong_direction,
         "pre_close_excluded": pre_close_excluded,
@@ -718,13 +780,17 @@ def _build(
     reference = opened.open
     close_price = closed.close
     if direction == SWING_HIGH:
-        price = max(bars[row].high for row in window)
-        matches = {row for row in window if bars[row].high == price}
+        if SWING_HIGH_BOUNDARY_EXTREME_FIELD != "high":
+            raise SpecialSwingError("swing high boundary extreme is not high")
+        price = max(getattr(bars[row], SWING_HIGH_BOUNDARY_EXTREME_FIELD) for row in window)
+        matches = {row for row in window if getattr(bars[row], SWING_HIGH_BOUNDARY_EXTREME_FIELD) == price}
         open_width = price - reference
         close_width = price - close_price
     else:
-        price = min(bars[row].low for row in window)
-        matches = {row for row in window if bars[row].low == price}
+        if SWING_LOW_BOUNDARY_EXTREME_FIELD != "low":
+            raise SpecialSwingError("swing low boundary extreme is not low")
+        price = min(getattr(bars[row], SWING_LOW_BOUNDARY_EXTREME_FIELD) for row in window)
+        matches = {row for row in window if getattr(bars[row], SWING_LOW_BOUNDARY_EXTREME_FIELD) == price}
         open_width = reference - price
         close_width = close_price - price
     end = max(matches)
@@ -741,14 +807,11 @@ def _build(
     if reason is not None:
         return None, reason
     body_low, body_high, body_size = _body(opened)
-    if body_size == 0:
-        return None, "SWING_OPEN_BODY_ZERO"
+    rejection = penetration_rejection(direction, close_price, body_low, body_high, body_size)
+    if rejection is not None:
+        return None, rejection
     threshold = body_threshold(direction, body_low, body_high, body_size)
-    if not body_penetrated(direction, close_price, threshold):
-        return None, "BODY_PENETRATION_NOT_REACHED"
     fraction = penetration_fraction(direction, close_price, body_low, body_high, body_size)
-    if fraction < REQUIRED_FRACTION:
-        return None, "BODY_PENETRATION_NOT_REACHED"
     segment = bars[open_row:close_row + 1]
     reference_candle = select_interior_body_reference(bars, open_row, close_row, direction, end, price)
     if provisional is not None and (
@@ -763,7 +826,9 @@ def _build(
         margin = None
         margin_percent = None
     else:
-        margin = reference_to_close_margin(direction, reference_candle["price"], close_price)
+        margin = reference_compatibility_margin(
+            direction, reference_candle["low"], reference_candle["high"], close_price
+        )
         if margin < 0:
             raise SpecialSwingError("compatibility-failed candidate was bound")
         compatibility_status = "PASS"
@@ -1017,15 +1082,17 @@ def _check_body_reference(bars: Sequence[Bar], item: Swing) -> None:
         raise SpecialSwingError("body reference tie representative is not the last match")
     if item.compatibility_status != "PASS":
         raise SpecialSwingError("confirmed reference compatibility did not pass")
-    expected_margin = reference_to_close_margin(item.direction, item.body_reference_price, item.close_price)
+    expected_margin = reference_compatibility_margin(
+        item.direction, candle.low, candle.high, item.close_price
+    )
     if item.reference_to_swing_close_margin != expected_margin or expected_margin < 0:
-        raise SpecialSwingError("reference-to-close margin is wrong")
+        raise SpecialSwingError("reference compatibility margin is wrong")
     if item.reference_to_swing_close_margin_percent != expected_margin / item.close_price * D100:
-        raise SpecialSwingError("reference-to-close margin percent is wrong")
-    if item.direction == SWING_HIGH and item.body_reference_price < item.close_price:
-        raise SpecialSwingError("confirmed swing high reference is below the close")
-    if item.direction == SWING_LOW and item.body_reference_price > item.close_price:
-        raise SpecialSwingError("confirmed swing low reference is above the close")
+        raise SpecialSwingError("reference compatibility margin percent is wrong")
+    if item.direction == SWING_HIGH and candle.low < item.close_price:
+        raise SpecialSwingError("confirmed swing high reference low is below the close")
+    if item.direction == SWING_LOW and candle.high > item.close_price:
+        raise SpecialSwingError("confirmed swing low reference high is above the close")
     if not item.final_reference_matches_provisional:
         raise SpecialSwingError("FINAL_REFERENCE_MISMATCH_WITH_ACCEPTED_PROVISIONAL_REFERENCE")
 
@@ -1094,8 +1161,20 @@ def _check_invariants(bars: Sequence[Bar], raw: list[Swing], searches: list[Sear
             raise SpecialSwingError("confirmed total length is outside 8-11")
         if not (item.open_row < item.extreme_row < item.close_row):
             raise SpecialSwingError("extremum is not strictly interior")
-        if item.body_size <= 0 or item.penetration_fraction < REQUIRED_FRACTION:
-            raise SpecialSwingError("body penetration is below one third")
+        opened_bar = bars[item.open_row]
+        closed_bar = bars[item.close_row]
+        body_low, body_high, body_size = swing_open_body(opened_bar.open, opened_bar.close)
+        rejection = penetration_rejection(item.direction, closed_bar.close, body_low, body_high, body_size)
+        if rejection is not None or item.penetration_fraction != penetration_fraction(
+            item.direction, closed_bar.close, body_low, body_high, body_size
+        ):
+            raise SpecialSwingError(rejection or "stored penetration ratio does not match the close")
+        extreme_window = range(item.open_row + 1, item.close_row)
+        if item.direction == SWING_HIGH:
+            if item.extreme_price != max(getattr(bars[row], SWING_HIGH_BOUNDARY_EXTREME_FIELD) for row in extreme_window):
+                raise SpecialSwingError("swing high boundary extreme is not the highest high")
+        elif item.extreme_price != min(getattr(bars[row], SWING_LOW_BOUNDARY_EXTREME_FIELD) for row in extreme_window):
+            raise SpecialSwingError("swing low boundary extreme is not the lowest low")
         if item.open_width_percent < MIN_BOUNDARY or item.close_width_percent < MIN_BOUNDARY:
             raise SpecialSwingError("confirmed boundary is below 1.00")
         _check_segments(bars, item)
@@ -1147,11 +1226,26 @@ def _counters(raw: list[Swing], searches: list[SearchRecord], displayed: list[Sw
         "compact": 0,
         "raw_by_interior": interior_map(raw),
         "primary_by_interior": interior_map(displayed),
-        "exact_one_third": sum(1 for item in raw if item.penetration_fraction == REQUIRED_FRACTION),
-        "more_than_one_third": sum(1 for item in raw if item.penetration_fraction > REQUIRED_FRACTION),
+        "exact_minimum_penetration": sum(
+            1 for item in raw
+            if item.penetration_fraction == Decimal(REQUIRED_BODY_PENETRATION_MIN_RATIO.numerator) / Decimal(REQUIRED_BODY_PENETRATION_MIN_RATIO.denominator)
+        ),
+        "above_minimum_within_maximum": sum(
+            1 for item in raw
+            if item.penetration_fraction > Decimal(REQUIRED_BODY_PENETRATION_MIN_RATIO.numerator) / Decimal(REQUIRED_BODY_PENETRATION_MIN_RATIO.denominator)
+        ),
+        "body_penetration_below_minimum": sum(
+            item.penetration_rejections.count("BODY_PENETRATION_BELOW_MINIMUM") for item in searches
+        ),
+        "body_penetration_above_maximum": sum(
+            item.penetration_rejections.count("BODY_PENETRATION_ABOVE_MAXIMUM") for item in searches
+        ),
+        "penetration_wrong_direction": sum(
+            item.penetration_rejections.count("PENETRATION_WRONG_DIRECTION") for item in searches
+        ),
         "wick_only_events": sum(item.wick_only for item in searches),
         "wick_only_confirmations": 0,
-        "doji_rejections": sum(1 for item in searches if item.terminal == "SWING_OPEN_BODY_ZERO"),
+        "doji_rejections": sum(1 for item in searches if item.terminal == "SWING_OPEN_BODY_SIZE_ZERO"),
         "open_boundary_below_1_00": sum(1 for item in searches if item.terminal == "OPEN_BOUNDARY_BELOW_1_00"),
         "close_boundary_below_1_00": sum(1 for item in searches if item.terminal == "CLOSE_BOUNDARY_BELOW_1_00"),
         "both_boundaries_below_1_00": sum(1 for item in searches if item.terminal == "BOTH_BOUNDARIES_BELOW_1_00"),
@@ -1258,6 +1352,8 @@ def _counters(raw: list[Swing], searches: list[SearchRecord], displayed: list[Sw
         "penetration_passing_candidates": sum(item.penetration_passing for item in searches),
         "swing_high_reference_below_close_failures": sum(item.reference_below_close for item in searches),
         "swing_low_reference_above_close_failures": sum(item.reference_above_close for item in searches),
+        "swing_high_reference_low_below_swing_close_close": sum(item.reference_below_close for item in searches),
+        "swing_low_reference_high_above_swing_close_close": sum(item.reference_above_close for item in searches),
         "candidates_accepted_on_equality": sum(item.equality_passes for item in searches),
         "candidates_accepted_with_positive_margin": sum(item.positive_margin_passes for item in searches),
         "missing_pair_candidates": sum(item.missing_pair_candidates for item in searches),
@@ -1284,11 +1380,15 @@ def _counters(raw: list[Swing], searches: list[SearchRecord], displayed: list[Sw
         "confirmed_missing_pair_count": sum(1 for item in raw if item.body_reference_row is None),
         "confirmed_swing_high_reference_below_close_count": sum(
             1 for item in raw
-            if item.direction == SWING_HIGH and item.body_reference_price is not None and item.body_reference_price < item.close_price
+            if item.direction == SWING_HIGH
+            and item.reference_to_swing_close_margin is not None
+            and item.reference_to_swing_close_margin < 0
         ),
         "confirmed_swing_low_reference_above_close_count": sum(
             1 for item in raw
-            if item.direction == SWING_LOW and item.body_reference_price is not None and item.body_reference_price > item.close_price
+            if item.direction == SWING_LOW
+            and item.reference_to_swing_close_margin is not None
+            and item.reference_to_swing_close_margin < 0
         ),
         "compatibility_failed_candidate_bound_count": 0,
         "search_beyond_nine_interiors_count": sum(item.above_horizon for item in searches),

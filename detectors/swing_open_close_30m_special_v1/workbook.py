@@ -16,6 +16,7 @@ from detectors.swing_open_close_30m_special_v1.config import (
     RESULT_COLUMNS,
     SHEETS,
     SWING_HIGH,
+    SWING_LOW,
     USER_PARAMETERS,
 )
 from detectors.swing_open_close_30m_special_v1.engine import Analysis, candle_direction, turkey_text
@@ -212,6 +213,10 @@ def _validate_result_row(row, item, bars) -> None:
             raise RuntimeError("reference OHLC does not match the source candle")
     if item.body_reference_price != candle.close:
         raise RuntimeError("reference price is not the reference candle Close")
+    if item.direction == SWING_HIGH and candle.low < closed.close:
+        raise RuntimeError("swing high reference low is below swing close close")
+    if item.direction == SWING_LOW and candle.high > closed.close:
+        raise RuntimeError("swing low reference high is above swing close close")
     if item.direction == SWING_HIGH:
         if any(not _blank(row[index]) for index in (12, 13, 14, 15)):
             raise RuntimeError("swing high contains a dip value")
@@ -297,16 +302,22 @@ def validate_workbook(path: Path, result: Analysis) -> dict:
             raise RuntimeError("obsolete 7-10 configuration is present")
         if "Lowest Close Among Bearish Interior Candles" in blob or "Highest Close Among Bullish Interior Candles" in blob:
             raise RuntimeError("obsolete single-candle reference rule is present")
-        if values["Swing High Reference-To-Close Rule"] != "Reference Close >= Swing Close Close":
-            raise RuntimeError("swing high reference-to-close rule is missing")
-        if values["Swing Low Reference-To-Close Rule"] != "Reference Close <= Swing Close Close":
-            raise RuntimeError("swing low reference-to-close rule is missing")
+        if values["Swing High Reference-To-Close Rule"] != "Interior Body Reference Low must be greater than or equal to Swing Close Close.":
+            raise RuntimeError("swing high reference-low rule is missing")
+        if values["Swing Low Reference-To-Close Rule"] != "Interior Body Reference High must be less than or equal to Swing Close Close.":
+            raise RuntimeError("swing low reference-high rule is missing")
         if values["Failed Compatibility Binds"] != "No" or values["Search Continues After Compatibility Failure"] != "Yes":
             raise RuntimeError("compatibility continuation rule is wrong")
         if values["Search Extension Beyond Nine Interiors"] != "No" or values["Second-Best Reference May Replace Failed Min/Max"] != "No":
             raise RuntimeError("compatibility search limit is wrong")
-        if "MINIMAL_16_COLUMN_EXCEL_V12" not in values["Configuration Version"]:
-            raise RuntimeError("configuration version is not V12")
+        if "MINIMAL_16_COLUMN_EXCEL_V16" not in values["Configuration Version"]:
+            raise RuntimeError("configuration version is not V16")
+        if "REFERENCE_LOW_HIGH_COMPATIBILITY" not in values["Configuration Version"]:
+            raise RuntimeError("configuration version does not name the reference wick rule")
+        if values["Required Body Penetration Minimum"] != "1/3" or values["Required Body Penetration Maximum"] != "5/3":
+            raise RuntimeError("body penetration interval is not 1/3 through 5/3")
+        if values["Swing High Boundary Extreme"] != "Highest High" or values["Swing Low Boundary Extreme"] != "Lowest Low":
+            raise RuntimeError("boundary extremes are not wick prices")
         if values["Minimum Boundary Percent"] != "1.00%" or "0.90%" in blob:
             raise RuntimeError("minimum boundary is not 1.00%")
         if values["Result Worksheet Column Count"] != "16" or values["Hidden Result Columns"] != "None":

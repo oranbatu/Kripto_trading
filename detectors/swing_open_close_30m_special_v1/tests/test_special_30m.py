@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 from detectors.swing_open_close_30m_special_v1.config import (
@@ -17,7 +18,14 @@ from detectors.swing_open_close_30m_special_v1.config import (
     MAX_INTERIOR,
     MAX_TOTAL,
     MIN_BOUNDARY,
+    MINIMUM_BOUNDARY_PERCENT,
     MIN_INTERIOR,
+    REQUIRED_BODY_PENETRATION_MAX_RATIO,
+    REQUIRED_BODY_PENETRATION_MIN_RATIO,
+    SWING_HIGH_BOUNDARY_EXTREME_FIELD,
+    SWING_HIGH_REQUIRE_REFERENCE_LOW_GTE_SWING_CLOSE_CLOSE,
+    SWING_LOW_BOUNDARY_EXTREME_FIELD,
+    SWING_LOW_REQUIRE_REFERENCE_HIGH_LTE_SWING_CLOSE_CLOSE,
     MIN_TOTAL,
     RESULT_COLUMNS,
     USER_PARAMETERS,
@@ -34,6 +42,7 @@ from detectors.swing_open_close_30m_special_v1.engine import (
     boundary_reason,
     duration_reason,
     penetration_fraction,
+    penetration_rejection,
     select_interior_body_reference,
     signature,
     swing_open_body,
@@ -96,7 +105,7 @@ class DurationTests(unittest.TestCase):
             bars = self._series(close_row)
             for index in range(7, close_row):
                 bars[index] = _bar(index, "103", "103.2", "102.4", "102.5")
-            bars[close_row] = _bar(close_row, "102.1", "102.2", "101.8", "102")
+            bars[close_row] = _bar(close_row, "102.1", "102.2", "101.8", "101.5")
             result = analyze(bars)
             high = next(item for item in result.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
             self.assertEqual(high.interior, interior)
@@ -105,7 +114,7 @@ class DurationTests(unittest.TestCase):
             self.assertEqual(high.close_row - high.open_row, interior + 1)
             self.assertGreaterEqual(high.close_row - high.open_row, FIRST_CLOSE_OFFSET)
             self.assertLessEqual(high.close_row - high.open_row, LAST_CLOSE_OFFSET)
-            self.assertEqual(high.penetration_fraction, THIRD)
+            self.assertEqual(high.penetration_fraction, Decimal("0.5"))
             self.assertEqual(candle_direction(bars[0].open, bars[0].close), "BULLISH")
             self.assertEqual(candle_direction(bars[close_row].open, bars[close_row].close), "BEARISH")
         early = self._series(12)
@@ -129,7 +138,7 @@ class DurationTests(unittest.TestCase):
     def test_pre_six_cross_cannot_bind_and_six_interior_close_is_first_eligible(self) -> None:
         bars = self._series(8)
         bars[6] = _bar(6, "102", "102.2", "90", "90")
-        bars[7] = _bar(7, "102.1", "102.2", "101.8", "102")
+        bars[7] = _bar(7, "102.1", "102.2", "101.8", "101.5")
         result = analyze(bars)
         high = next(item for item in result.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
         self.assertEqual(high.close_row, 7)
@@ -151,13 +160,13 @@ class BodyTests(unittest.TestCase):
         self.assertTrue(body_penetrated("SWING_HIGH", Decimal("102"), threshold))
         self.assertFalse(body_penetrated("SWING_HIGH", Decimal("102.00000001"), threshold))
         self.assertTrue(body_penetrated("SWING_LOW", Decimal("101"), low_threshold))
-        self.assertEqual(penetration_fraction("SWING_HIGH", Decimal("102"), low, high, size), THIRD)
+        self.assertEqual(penetration_fraction("SWING_HIGH", Decimal("102"), low, high, size), Decimal(1) / Decimal(3))
 
     def test_close_body_size_is_irrelevant_and_doji_fails(self) -> None:
         bars = _quiet(12)
         bars[0] = _bar(0, "100", "130", "90", "103")
-        bars[4] = _bar(4, "100", "120", "99", "100")
-        bars[8] = _bar(8, "102.1", "102.2", "101.8", "102")
+        bars[4] = _bar(4, "100", "120", "99", "120")
+        bars[8] = _bar(8, "102.1", "102.2", "101.8", "101.5")
         result = analyze(bars)
         confirmed = [item for item in result.raw if item.open_row == 0 and item.direction == "SWING_HIGH"]
         self.assertEqual(len(confirmed), 1)
@@ -166,7 +175,7 @@ class BodyTests(unittest.TestCase):
         doji[0] = _bar(0, "100", "110", "90", "100")
         doji_result = analyze(doji)
         terminals = {item.terminal for item in doji_result.searches if item.open_row == 0}
-        self.assertEqual(terminals, {"SWING_OPEN_BODY_ZERO"})
+        self.assertEqual(terminals, {"SWING_OPEN_BODY_SIZE_ZERO"})
 
     def test_wick_only_does_not_bind_and_failed_binding_is_not_replaced(self) -> None:
         bars = _quiet(13)
@@ -199,7 +208,10 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn("CLOSE_BOUNDARY_BELOW_0_90", FORBIDDEN_TERMINALS)
         self.assertIn("BOTH_BOUNDARIES_BELOW_0_90", FORBIDDEN_TERMINALS)
         self.assertIn("BOUNDARY_ABOVE_MAXIMUM", FORBIDDEN_TERMINALS)
-        self.assertIn("MINIMAL_16_COLUMN_EXCEL_V12", CONFIGURATION_VERSION)
+        self.assertIn("MINIMAL_16_COLUMN_EXCEL_V16", CONFIGURATION_VERSION)
+        self.assertIn("REFERENCE_LOW_HIGH_COMPATIBILITY", CONFIGURATION_VERSION)
+        self.assertIn("PENETRATION_1_3_TO_5_3", CONFIGURATION_VERSION)
+        self.assertIn("WICK_BOUNDARY_1_00", CONFIGURATION_VERSION)
 
 
 class StructureTests(unittest.TestCase):
@@ -229,7 +241,7 @@ class StructureTests(unittest.TestCase):
         bars[0] = _bar(0, "100", "104", "99", "103")
         bars[1] = _bar(1, "100", "104", "99", "103")
         for index in (4, 5):
-            bars[index] = _bar(index, "100", "110", "99", "100")
+            bars[index] = _bar(index, "100", "110", "99", "110")
         bars[8] = _bar(8, "102", "102.2", "100", "101")
         bars[9] = _bar(9, "102", "102.2", "100", "101")
         result = analyze(bars)
@@ -246,7 +258,7 @@ class WorkbookTests(unittest.TestCase):
     def test_workbook_contract_and_revision(self) -> None:
         bars = _quiet(12)
         bars[0] = _bar(0, "100", "104", "99", "103")
-        bars[4] = _bar(4, "100", "110", "99", "100")
+        bars[4] = _bar(4, "100", "110", "99", "110")
         bars[8] = _bar(8, "102", "102.2", "100", "101")
         result = analyze(bars)
         self.assertGreaterEqual(len(result.displayed), 1)
@@ -274,8 +286,16 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(dict(USER_PARAMETERS)["Pre-Close Interior Candle Eligible As Reference"], "No")
             self.assertEqual(dict(USER_PARAMETERS)["Reference Row Maximum"], "close_row - 2")
             self.assertEqual(dict(USER_PARAMETERS)["Reference OHLC Exported"], "Open, High, Low, Close")
-            self.assertEqual(dict(USER_PARAMETERS)["Swing High Reference-To-Close Rule"], "Reference Close >= Swing Close Close")
-            self.assertEqual(dict(USER_PARAMETERS)["Swing Low Reference-To-Close Rule"], "Reference Close <= Swing Close Close")
+            self.assertEqual(
+                dict(USER_PARAMETERS)["Swing High Reference-To-Close Rule"],
+                "Interior Body Reference Low must be greater than or equal to Swing Close Close.",
+            )
+            self.assertEqual(
+                dict(USER_PARAMETERS)["Swing Low Reference-To-Close Rule"],
+                "Interior Body Reference High must be less than or equal to Swing Close Close.",
+            )
+            self.assertTrue(SWING_HIGH_REQUIRE_REFERENCE_LOW_GTE_SWING_CLOSE_CLOSE)
+            self.assertTrue(SWING_LOW_REQUIRE_REFERENCE_HIGH_LTE_SWING_CLOSE_CLOSE)
             self.assertEqual(dict(USER_PARAMETERS)["Exact Equality Passes"], "Yes")
             self.assertEqual(dict(USER_PARAMETERS)["Failed Compatibility Binds"], "No")
             self.assertEqual(dict(USER_PARAMETERS)["Search Continues After Compatibility Failure"], "Yes")
@@ -293,7 +313,8 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(dict(USER_PARAMETERS)["Final Interior Candle Eligible As Reference"], "No")
             self.assertEqual(dict(USER_PARAMETERS)["Swing Open Eligible In Reference Pair"], "No")
             self.assertEqual(dict(USER_PARAMETERS)["Swing Close Eligible In Reference Pair"], "No")
-            self.assertEqual(dict(USER_PARAMETERS)["Reference Wicks Used"], "No")
+            self.assertEqual(dict(USER_PARAMETERS)["Reference Wicks Used For Selection"], "No")
+            self.assertEqual(dict(USER_PARAMETERS)["Reference Wicks Used"], "Yes, Swing High Reference Low And Swing Low Reference High")
             self.assertEqual(dict(USER_PARAMETERS)["Validation Candle Close Used For Selection"], "No")
             self.assertEqual(dict(USER_PARAMETERS)["Geometric Middle Required"], "No")
             self.assertEqual(dict(USER_PARAMETERS)["Missing Pair Rejects Swing"], "No")
@@ -445,7 +466,7 @@ class BodyReferenceTests(unittest.TestCase):
         bars[0] = _bar(0, "103", "104", "99.5", "100")
         for index in range(1, 8):
             bars[index] = _bar(index, "97", "100.2", "90" if index == 3 else "96", "96")
-        bars[8] = _bar(8, "100.5", "102", "100", "101")
+        bars[8] = _bar(8, "100.5", "102", "100", "101.5")
         result = analyze(bars)
         low = next(item for item in result.raw if item.open_row == 0 and item.direction == "SWING_LOW")
         self.assertEqual(low.body_reference_status, "NO_BULLISH_TO_BEARISH_INTERIOR_PAIR_FOR_SWING_LOW")
@@ -502,7 +523,7 @@ class BodyReferenceTests(unittest.TestCase):
         bars[2] = _bar(2, "110", "111", "100", "100")
         bars[3] = _bar(3, "110", "112", "108", "109")
         bars[4] = _bar(4, "109", "111", "108", "110")
-        bars[8] = _bar(8, "102.4", "102.6", "101.5", "102")
+        bars[8] = _bar(8, "102.4", "102.6", "101.5", "101.5")
         result = analyze(bars)
         high = next(item for item in result.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
         self.assertEqual(high.extreme_row, 3)
@@ -537,7 +558,7 @@ class BodyReferenceTests(unittest.TestCase):
         self.assertEqual(_primary_key(left)[:6], _primary_key(right)[:6])
         bars = _quiet(12)
         bars[0] = _bar(0, "100", "104", "99", "103")
-        bars[4] = _bar(4, "100", "110", "99", "100")
+        bars[4] = _bar(4, "100", "110", "99", "110")
         bars[8] = _bar(8, "102", "102.2", "100", "101")
         changed = list(bars)
         changed[11] = _bar(11, "100", "180", "90", "170")
@@ -590,12 +611,12 @@ class DirectionTests(unittest.TestCase):
         doji = _quiet(12)
         doji[0] = _bar(0, "100", "110", "90", "100")
         doji_result = analyze(doji)
-        self.assertTrue(all(item.terminal == "SWING_OPEN_BODY_ZERO" for item in doji_result.searches if item.open_row == 0))
+        self.assertTrue(all(item.terminal == "SWING_OPEN_BODY_SIZE_ZERO" for item in doji_result.searches if item.open_row == 0))
 
     def test_wrong_direction_threshold_crossing_does_not_bind_and_search_continues(self) -> None:
         bars = _quiet(13)
         bars[0] = _bar(0, "100", "104", "99", "103")
-        bars[4] = _bar(4, "100", "110", "99", "100")
+        bars[4] = _bar(4, "100", "110", "99", "110")
         bars[8] = _bar(8, "100", "101", "99", "101")
         bars[9] = _bar(9, "102", "102.2", "100", "101")
         result = analyze(bars)
@@ -625,8 +646,8 @@ class DirectionTests(unittest.TestCase):
         bars = _quiet(13)
         bars[0] = _bar(0, "103", "104", "99", "100")
         bars[4] = _bar(4, "100", "101", "90", "100")
-        bars[8] = _bar(8, "102", "103", "99", "101")
-        bars[9] = _bar(9, "100.5", "102", "100", "101")
+        bars[8] = _bar(8, "102", "103", "99", "101.5")
+        bars[9] = _bar(9, "100.5", "102", "100", "101.5")
         result = analyze(bars)
         low = next(item for item in result.raw if item.open_row == 0 and item.direction == "SWING_LOW")
         self.assertEqual(low.close_row, 9)
@@ -660,15 +681,15 @@ class DirectionTests(unittest.TestCase):
         self.assertEqual(six_record.terminal, "SEARCH_HORIZON_EXHAUSTED_AT_9_INTERIORS")
         nine = _quiet(12)
         nine[0] = _bar(0, "100", "130", "90", "103")
-        nine[4] = _bar(4, "100", "120", "99", "100")
+        nine[4] = _bar(4, "100", "120", "99", "120")
         nine[7] = _bar(7, "103", "103.2", "90", "102.5")
-        nine[10] = _bar(10, "102.1", "102.2", "101.8", "102")
+        nine[10] = _bar(10, "102.1", "102.2", "101.8", "101.5")
         nine_result = analyze(nine)
         high = next(item for item in nine_result.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
         self.assertEqual(high.interior, 9)
         self.assertEqual(high.total, 11)
         self.assertEqual(high.close_row, 10)
-        self.assertEqual(high.penetration_fraction, THIRD)
+        self.assertEqual(high.penetration_fraction, Decimal("0.5"))
         self.assertEqual(candle_direction(nine[10].open, nine[10].close), "BEARISH")
         record = next(item for item in nine_result.searches if item.open_row == 0 and item.direction == "SWING_HIGH")
         self.assertGreaterEqual(record.wick_only, 1)
@@ -677,7 +698,7 @@ class DirectionTests(unittest.TestCase):
         low_bars[0] = _bar(0, "103", "104", "99", "100")
         low_bars[4] = _bar(4, "100", "101", "90", "100")
         low_bars[7] = _bar(7, "102", "103", "99", "101")
-        low_bars[10] = _bar(10, "100.5", "102", "100", "101")
+        low_bars[10] = _bar(10, "100.5", "102", "100", "101.5")
         low = next(item for item in analyze(low_bars).raw if item.open_row == 0 and item.direction == "SWING_LOW")
         self.assertEqual(low.interior, 9)
         self.assertEqual(low.close_row, 10)
@@ -688,8 +709,8 @@ class DirectionTests(unittest.TestCase):
 class CompatibilityTests(unittest.TestCase):
     def test_swing_high_failure_continues_and_keeps_the_minimum_reference(self) -> None:
         bars = _quiet(12)
-        bars[0] = _bar(0, "100", "104", "99", "103")
-        bars[1] = _bar(1, "100", "101", "89", "90")
+        bars[0] = _bar(0, "100", "140", "99", "133")
+        bars[1] = _bar(1, "100", "101", "90", "90")
         bars[2] = _bar(2, "90", "111", "89", "110")
         bars[3] = _bar(3, "112", "113", "109", "110")
         bars[4] = _bar(4, "110", "111", "109", "111")
@@ -721,7 +742,9 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(record.max_interior, 8)
         self.assertEqual(record.above_horizon, 0)
         self.assertEqual(record.compatibility_audit[0]["status"], "FAIL")
-        self.assertEqual(record.compatibility_audit[0]["code"], "REFERENCE_CLOSE_BELOW_SWING_CLOSE_FOR_SWING_HIGH")
+        self.assertEqual(record.compatibility_audit[0]["code"], "SWING_HIGH_REFERENCE_LOW_BELOW_SWING_CLOSE_CLOSE")
+        self.assertEqual(record.compatibility_audit[0]["reference_low"], Decimal("90"))
+        self.assertLess(record.compatibility_audit[0]["reference_low"], Decimal("100"))
         self.assertEqual(record.compatibility_audit[0]["reference_price"], Decimal("90"))
         self.assertEqual(record.compatibility_audit[0]["eligible_count"], 2)
         self.assertEqual(record.compatibility_audit[1]["status"], "PASS")
@@ -738,7 +761,7 @@ class CompatibilityTests(unittest.TestCase):
     def test_swing_high_exact_equality_passes(self) -> None:
         bars = _quiet(12)
         bars[0] = _bar(0, "100", "104", "99", "103")
-        bars[1] = _bar(1, "102", "111", "100", "101")
+        bars[1] = _bar(1, "102", "111", "101", "101")
         bars[2] = _bar(2, "101", "111", "100", "110")
         bars[7] = _bar(7, "102", "103", "100", "101")
         high = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
@@ -769,8 +792,8 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_swing_low_failure_continues_and_keeps_the_maximum_reference(self) -> None:
         bars = _quiet(12)
-        bars[0] = _bar(0, "103", "104", "99", "100")
-        bars[1] = _bar(1, "100", "112", "99", "110")
+        bars[0] = _bar(0, "114", "120", "89", "90")
+        bars[1] = _bar(1, "100", "110", "99", "110")
         bars[2] = _bar(2, "110", "111", "89", "100")
         bars[3] = _bar(3, "100", "103", "99", "102")
         bars[4] = _bar(4, "102", "103", "98", "99")
@@ -796,7 +819,9 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(record.compatibility_rejected, 1)
         self.assertEqual(record.reference_above_close, 1)
         self.assertEqual(record.reference_recalculations, 2)
-        self.assertEqual(record.compatibility_audit[0]["code"], "REFERENCE_CLOSE_ABOVE_SWING_CLOSE_FOR_SWING_LOW")
+        self.assertEqual(record.compatibility_audit[0]["code"], "SWING_LOW_REFERENCE_HIGH_ABOVE_SWING_CLOSE_CLOSE")
+        self.assertEqual(record.compatibility_audit[0]["reference_high"], Decimal("110"))
+        self.assertGreater(record.compatibility_audit[0]["reference_high"], Decimal("105"))
         self.assertEqual(record.compatibility_audit[0]["reference_price"], Decimal("110"))
         self.assertEqual(record.compatibility_audit[0]["eligible_count"], 2)
         self.assertEqual(record.compatibility_audit[1]["status"], "PASS")
@@ -807,9 +832,9 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_swing_low_exact_equality_passes(self) -> None:
         bars = _quiet(12)
-        bars[0] = _bar(0, "103", "104", "99", "100")
-        bars[1] = _bar(1, "100", "112", "99", "101")
-        bars[2] = _bar(2, "101", "102", "89", "100")
+        bars[0] = _bar(0, "102", "104", "99", "100")
+        bars[1] = _bar(1, "100", "101", "99", "101")
+        bars[2] = _bar(2, "101", "102", "89", "99")
         bars[7] = _bar(7, "100", "102", "99", "101")
         low = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_LOW")
         self.assertEqual(low.close_row, 7)
@@ -820,8 +845,8 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_swing_low_rejections_stop_at_nine_interiors(self) -> None:
         bars = _quiet(14)
-        bars[0] = _bar(0, "103", "104", "99", "100")
-        bars[1] = _bar(1, "100", "112", "99", "110")
+        bars[0] = _bar(0, "106", "112", "99", "100")
+        bars[1] = _bar(1, "100", "110", "99", "110")
         bars[2] = _bar(2, "110", "111", "89", "100")
         for index in range(7, 12):
             bars[index] = _bar(index, "100", "106", "99", "105")
@@ -836,7 +861,7 @@ class CompatibilityTests(unittest.TestCase):
     def test_compatible_boundary_failure_cannot_be_replaced(self) -> None:
         bars = _quiet(12)
         bars[0] = _bar(0, "100", "104", "99", "103")
-        bars[1] = _bar(1, "101.00000002", "101.00000002", "100.5", "101")
+        bars[1] = _bar(1, "101.00000002", "101.00000002", "101", "101")
         bars[2] = _bar(2, "101", "101.00000002", "100.5", "101.00000001")
         bars[7] = _bar(7, "101.2", "130", "100", "101")
         bars[8] = _bar(8, "102", "102", "100", "90")
@@ -908,7 +933,7 @@ class CompatibilityTests(unittest.TestCase):
         bars[0] = _bar(0, "100", "104", "99", "103")
         bars[1] = _bar(1, "110", "112", "108", "109")
         bars[2] = _bar(2, "109", "111", "108", "110")
-        bars[8] = _bar(8, "102.4", "102.6", "101.5", "102")
+        bars[8] = _bar(8, "102.4", "102.6", "101.5", "101.5")
         result = analyze(bars)
         high = next(item for item in result.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
         candle = bars[high.body_reference_row]
@@ -928,21 +953,166 @@ class CompatibilityTests(unittest.TestCase):
             validate_workbook(path, result)
 
 
+class ReferenceWickCompatibilityTests(unittest.TestCase):
+    def test_swing_high_edges_compare_reference_low_only(self) -> None:
+        def run(reference_low: str, swing_close: str = "101"):
+            bars = _quiet(12)
+            bars[0] = _bar(0, "100", "104", "99", "103")
+            bars[1] = _bar(1, "120", "130", reference_low, "110")
+            bars[2] = _bar(2, "110", "140", "100", "120")
+            bars[3] = _bar(3, "100", "150", "99", "140")
+            bars[7] = _bar(7, "112", "113", "99", swing_close)
+            return analyze(bars)
+
+        equal = run("101")
+        high = next(item for item in equal.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(high.close_row, 7)
+        self.assertEqual(high.reference_to_swing_close_margin, Decimal("0"))
+        self.assertEqual(equal.bars[high.body_reference_row].low, high.close_price)
+        self.assertGreater(equal.bars[high.body_reference_row].open, high.close_price)
+        self.assertGreater(equal.bars[high.body_reference_row].high, high.close_price)
+        self.assertGreater(equal.bars[high.body_reference_row].close, high.close_price)
+        self.assertEqual(high.peak_1_row, 1)
+        self.assertEqual(high.peak_1_price, Decimal("130"))
+        self.assertEqual(high.peak_2_row, 3)
+        self.assertEqual(high.peak_2_price, Decimal("150"))
+        above = run("101.00000001")
+        above_high = next(item for item in above.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(above_high.close_row, 7)
+        self.assertEqual(above_high.reference_to_swing_close_margin, Decimal("0.00000001"))
+        below = run("100.99999999")
+        self.assertFalse(any(item.open_row == 0 and item.direction == "SWING_HIGH" for item in below.raw))
+        record = next(item for item in below.searches if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(record.compatibility_audit[0]["code"], "SWING_HIGH_REFERENCE_LOW_BELOW_SWING_CLOSE_CLOSE")
+        self.assertEqual(record.compatibility_audit[0]["reference_low"], Decimal("100.99999999"))
+        self.assertGreaterEqual(record.compatibility_audit[0]["reference_price"], Decimal("101"))
+        self.assertEqual(round(Decimal("100.99999999"), 2), round(Decimal("101"), 2))
+        self.assertEqual(signature(equal), signature(run("101")))
+
+    def test_swing_low_edges_compare_reference_high_only(self) -> None:
+        def run(reference_high: str, swing_close: str = "101"):
+            bars = _quiet(12)
+            bars[0] = _bar(0, "103", "104", "90", "100")
+            bars[1] = _bar(1, "80", reference_high, "70", "90")
+            bars[2] = _bar(2, "90", "91", "70", "80")
+            bars[7] = _bar(7, "99", "120", "98", swing_close)
+            return analyze(bars)
+
+        equal = run("101")
+        low = next(item for item in equal.raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(low.close_row, 7)
+        self.assertEqual(low.reference_to_swing_close_margin, Decimal("0"))
+        candle = equal.bars[low.body_reference_row]
+        self.assertEqual(candle.high, low.close_price)
+        self.assertLess(candle.open, low.close_price)
+        self.assertLess(candle.low, low.close_price)
+        self.assertLess(candle.close, low.close_price)
+        self.assertEqual(low.dip_1_row, 1)
+        self.assertEqual(low.dip_1_price, Decimal("70"))
+        self.assertEqual(low.dip_2_row, 2)
+        self.assertEqual(low.dip_2_price, Decimal("70"))
+        deeper = run("100.5")
+        deeper_low = next(item for item in deeper.raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(deeper_low.reference_to_swing_close_margin, Decimal("0.5"))
+        above = run("101.00000001")
+        self.assertFalse(any(item.open_row == 0 and item.direction == "SWING_LOW" for item in above.raw))
+        record = next(item for item in above.searches if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(record.compatibility_audit[0]["code"], "SWING_LOW_REFERENCE_HIGH_ABOVE_SWING_CLOSE_CLOSE")
+        self.assertEqual(record.compatibility_audit[0]["reference_high"], Decimal("101.00000001"))
+        self.assertLessEqual(record.compatibility_audit[0]["reference_price"], Decimal("101"))
+        self.assertEqual(round(Decimal("101.00000001"), 2), round(Decimal("101"), 2))
+        self.assertEqual(signature(equal), signature(run("101")))
+
+    def test_failed_wick_does_not_block_a_later_recomputed_reference(self) -> None:
+        high_bars = _quiet(12)
+        high_bars[0] = _bar(0, "100", "104", "99", "103")
+        high_bars[1] = _bar(1, "120", "130", "100", "110")
+        high_bars[2] = _bar(2, "110", "140", "100", "120")
+        high_bars[3] = _bar(3, "100", "150", "99", "140")
+        high_bars[7] = _bar(7, "102", "103", "100.4", "101")
+        high_bars[8] = _bar(8, "101", "150", "100", "140")
+        high_bars[9] = _bar(9, "101", "102", "98", "100.4")
+        high_result = analyze(high_bars)
+        high = next(item for item in high_result.raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        high_record = next(item for item in high_result.searches if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(high.close_row, 9)
+        self.assertEqual(high.interior, 8)
+        self.assertEqual(high.body_reference_row, 7)
+        self.assertEqual(high.body_reference_price, Decimal("101"))
+        self.assertEqual(high_bars[high.body_reference_row].low, Decimal("100.4"))
+        self.assertEqual(high.reference_to_swing_close_margin, Decimal("0"))
+        self.assertEqual(high_record.compatibility_audit[0]["reference_row"], 1)
+        self.assertEqual(high_record.compatibility_audit[0]["code"], "SWING_HIGH_REFERENCE_LOW_BELOW_SWING_CLOSE_CLOSE")
+        self.assertTrue(high_record.compatibility_audit[0]["recomputed"])
+        self.assertTrue(high_record.compatibility_audit[1]["recomputed"])
+        self.assertNotEqual(high_record.compatibility_audit[0]["reference_row"], high_record.compatibility_audit[1]["reference_row"])
+        self.assertEqual(high_record.max_interior, 8)
+        self.assertEqual(high_record.above_horizon, 0)
+        self.assertLessEqual(high_record.evaluated_closes, 4)
+        self.assertEqual(high.peak_1_price, Decimal("150"))
+        self.assertEqual(high.peak_2_row, 8)
+        low_bars = _quiet(12)
+        low_bars[0] = _bar(0, "103", "104", "90", "100")
+        low_bars[1] = _bar(1, "90", "110", "80", "100")
+        low_bars[2] = _bar(2, "100", "101", "80", "90")
+        low_bars[7] = _bar(7, "100", "102", "99", "105")
+        low_bars[8] = _bar(8, "105", "106", "90", "100")
+        low_bars[9] = _bar(9, "100", "110", "99", "105")
+        low_result = analyze(low_bars)
+        low = next(item for item in low_result.raw if item.open_row == 0 and item.direction == "SWING_LOW")
+        low_record = next(item for item in low_result.searches if item.open_row == 0 and item.direction == "SWING_LOW")
+        self.assertEqual(low.close_row, 9)
+        self.assertEqual(low.body_reference_row, 7)
+        self.assertEqual(low.body_reference_price, Decimal("105"))
+        self.assertEqual(low_bars[1].high, Decimal("110"))
+        self.assertEqual(low_record.compatibility_audit[0]["code"], "SWING_LOW_REFERENCE_HIGH_ABOVE_SWING_CLOSE_CLOSE")
+        self.assertNotEqual(low_record.compatibility_audit[0]["reference_row"], low.body_reference_row)
+        self.assertEqual(low.reference_to_swing_close_margin, Decimal("3"))
+        self.assertEqual(low.penetration_fraction, Decimal("5") / Decimal("3"))
+        self.assertEqual(low.dip_1_price, Decimal("80"))
+        self.assertEqual(low.dip_2_row, 8)
+        self.assertEqual(low_record.max_interior, 8)
+        self.assertEqual(candle_direction(low_bars[0].open, low_bars[0].close), "BEARISH")
+        self.assertEqual(candle_direction(low_bars[9].open, low_bars[9].close), "BULLISH")
+        self.assertEqual(candle_direction(high_bars[0].open, high_bars[0].close), "BULLISH")
+        self.assertEqual(candle_direction(high_bars[9].open, high_bars[9].close), "BEARISH")
+        self.assertEqual(REQUIRED_BODY_PENETRATION_MIN_RATIO, Fraction(1, 3))
+        self.assertEqual(REQUIRED_BODY_PENETRATION_MAX_RATIO, Fraction(5, 3))
+        self.assertEqual(MIN_BOUNDARY, Decimal("1.00"))
+        self.assertEqual(SWING_HIGH_BOUNDARY_EXTREME_FIELD, "high")
+        self.assertEqual(SWING_LOW_BOUNDARY_EXTREME_FIELD, "low")
+        self.assertTrue(SWING_HIGH_REQUIRE_REFERENCE_LOW_GTE_SWING_CLOSE_CLOSE)
+        self.assertTrue(SWING_LOW_REQUIRE_REFERENCE_HIGH_LTE_SWING_CLOSE_CLOSE)
+        self.assertEqual(MIN_INTERIOR, 6)
+        self.assertEqual(MAX_INTERIOR, 9)
+        self.assertEqual(FIRST_CLOSE_OFFSET, 7)
+        self.assertEqual(LAST_CLOSE_OFFSET, 10)
+        self.assertEqual(len(RESULT_COLUMNS), 16)
+        self.assertEqual(RESULT_COLUMNS[4:8], (
+            "Interior Body Reference Open",
+            "Interior Body Reference High",
+            "Interior Body Reference Low",
+            "Interior Body Reference Close",
+        ))
+        self.assertEqual(signature(high_result), signature(analyze(high_bars)))
+        self.assertEqual(signature(low_result), signature(analyze(low_bars)))
+
+
 class PeakDipTests(unittest.TestCase):
     def _high(self, open_high="104", reference_high="112", validation_high="111", close_high="102.6") -> list[Bar]:
         bars = _quiet(9)
         bars[0] = _bar(0, "100", open_high, "99", "103")
         bars[1] = _bar(1, "110", reference_high, "108", "109")
         bars[2] = _bar(2, "109", validation_high, "108", "110")
-        bars[8] = _bar(8, "102.4", close_high, "101.5", "102")
+        bars[8] = _bar(8, "102.4", close_high, "101.5", "101.5")
         return bars
 
     def _low(self, open_low="99", reference_low="95", validation_low="90", close_low="99") -> list[Bar]:
         bars = _quiet(8)
         bars[0] = _bar(0, "103", "104", open_low, "100")
-        bars[1] = _bar(1, "100", "112", reference_low, "101")
+        bars[1] = _bar(1, "100", "101", reference_low, "101")
         bars[2] = _bar(2, "101", "102", validation_low, "100")
-        bars[7] = _bar(7, "100", "106", close_low, "105")
+        bars[7] = _bar(7, "100", "106", close_low, "102")
         return bars
 
     def test_swing_high_peak_segments_cover_the_formation_once(self) -> None:
@@ -997,7 +1167,7 @@ class PeakDipTests(unittest.TestCase):
     def test_missing_pair_leaves_peaks_blank_and_later_data_does_not_repaint(self) -> None:
         bars = _quiet(9)
         bars[0] = _bar(0, "100", "104", "99", "103")
-        bars[4] = _bar(4, "100", "110", "99", "100")
+        bars[4] = _bar(4, "100", "110", "99", "110")
         bars[8] = _bar(8, "102", "102.2", "100", "101")
         missing = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
         self.assertIsNone(missing.body_reference_row)
@@ -1017,7 +1187,7 @@ class PeakDipTests(unittest.TestCase):
     def test_large_peak_does_not_replace_the_boundary_extremum(self) -> None:
         bars = _quiet(9)
         bars[0] = _bar(0, "100", "500", "99", "103")
-        bars[1] = _bar(1, "102", "102", "100.2", "101.2")
+        bars[1] = _bar(1, "102", "102", "101.2", "101.2")
         bars[2] = _bar(2, "100.4", "100.6", "100.3", "100.5")
         bars[8] = _bar(8, "102", "102.2", "100", "101")
         record = next(item for item in analyze(bars).searches if item.open_row == 0 and item.direction == "SWING_HIGH")
@@ -1063,7 +1233,7 @@ class PeakDipTests(unittest.TestCase):
         bars = _quiet(8)
         bars[0] = _bar(0, "103", "104", "90", "100")
         bars[3] = _bar(3, "100", "101", "80", "100")
-        bars[7] = _bar(7, "100", "106", "99", "105")
+        bars[7] = _bar(7, "100", "106", "99", "102")
         missing = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_LOW")
         self.assertIsNone(missing.body_reference_row)
         self.assertEqual(missing.segment_status, "DIP_SEGMENTS_NOT_AVAILABLE_NO_REFERENCE_PAIR")
@@ -1104,6 +1274,219 @@ class PeakDipTests(unittest.TestCase):
             low_path = Path(folder) / "dips.xlsx"
             write_workbook(low_path, low_result)
             validate_workbook(low_path, low_result)
+
+
+class PenetrationIntervalTests(unittest.TestCase):
+    def _high(self, close: str, interior_close: str = "110", interior_high: str = "111", future_close: str | None = None) -> list[Bar]:
+        bars = _quiet(8 if future_close is None else 9)
+        bars[0] = _bar(0, "100", "104", "99", "103")
+        for index in range(1, 7):
+            bars[index] = _bar(index, "100", interior_high, interior_close, interior_close)
+        level = Decimal(interior_close)
+        bars[1] = _bar(1, str(level + Decimal("0.1")), interior_high, interior_close, interior_close)
+        bars[2] = _bar(2, str(level - Decimal("0.1")), interior_high, interior_close, interior_close)
+        bars[7] = _bar(7, "102", "102.2", "90", close)
+        if future_close is not None:
+            bars[8] = _bar(8, "100", "100", "1", future_close)
+        return bars
+
+    def _low(self, close: str, interior_close: str = "90", interior_low: str = "80") -> list[Bar]:
+        bars = _quiet(8)
+        bars[0] = _bar(0, "103", "104", "99", "100")
+        for index in range(1, 7):
+            bars[index] = _bar(index, "100", "150", interior_low, interior_close)
+        level = Decimal(interior_close)
+        bars[1] = _bar(1, str(level - Decimal("0.1")), interior_close, interior_low, interior_close)
+        bars[2] = _bar(2, str(level + Decimal("0.1")), "150", interior_low, interior_close)
+        bars[7] = _bar(7, "100", "140", "99", close)
+        return bars
+
+    def test_exact_interval_edges_and_ratio_one(self) -> None:
+        self.assertEqual(REQUIRED_BODY_PENETRATION_MIN_RATIO.numerator, 1)
+        self.assertEqual(REQUIRED_BODY_PENETRATION_MIN_RATIO.denominator, 3)
+        self.assertEqual(REQUIRED_BODY_PENETRATION_MAX_RATIO.numerator, 5)
+        self.assertEqual(REQUIRED_BODY_PENETRATION_MAX_RATIO.denominator, 3)
+        self.assertNotEqual(REQUIRED_BODY_PENETRATION_MAX_RATIO, Decimal("1.67"))
+        low, high, size = swing_open_body(Decimal("100"), Decimal("103"))
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("102"), low, high, size))
+        self.assertEqual(penetration_fraction("SWING_HIGH", Decimal("102"), low, high, size), Decimal(1) / Decimal(3))
+        self.assertEqual(penetration_rejection("SWING_HIGH", Decimal("102.00000001"), low, high, size), "BODY_PENETRATION_BELOW_MINIMUM")
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("101.5"), low, high, size))
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("101.8"), low, high, size))
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("99"), low, high, size))
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("98.5"), low, high, size))
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("98"), low, high, size))
+        self.assertEqual(penetration_fraction("SWING_HIGH", Decimal("98"), low, high, size), Decimal(5) / Decimal(3))
+        self.assertEqual(penetration_rejection("SWING_HIGH", Decimal("97.99999999"), low, high, size), "BODY_PENETRATION_ABOVE_MAXIMUM")
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("100"), low, high, size))
+        self.assertEqual(penetration_fraction("SWING_HIGH", Decimal("100"), low, high, size), Decimal("1"))
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("99.5"), low, high, size))
+        self.assertGreater(penetration_fraction("SWING_HIGH", Decimal("99.5"), low, high, size), Decimal("1"))
+        self.assertEqual(penetration_rejection("SWING_HIGH", Decimal("104"), low, high, size), "PENETRATION_WRONG_DIRECTION")
+        self.assertEqual(penetration_rejection("SWING_HIGH", Decimal("101"), Decimal("100"), Decimal("100"), Decimal("0")), "SWING_OPEN_BODY_SIZE_ZERO")
+        low_body, high_body, low_size = swing_open_body(Decimal("103"), Decimal("100"))
+        self.assertIsNone(penetration_rejection("SWING_LOW", Decimal("101"), low_body, high_body, low_size))
+        self.assertEqual(penetration_fraction("SWING_LOW", Decimal("101"), low_body, high_body, low_size), Decimal(1) / Decimal(3))
+        self.assertEqual(penetration_rejection("SWING_LOW", Decimal("100.99999999"), low_body, high_body, low_size), "BODY_PENETRATION_BELOW_MINIMUM")
+        self.assertIsNone(penetration_rejection("SWING_LOW", Decimal("101.5"), low_body, high_body, low_size))
+        self.assertIsNone(penetration_rejection("SWING_LOW", Decimal("101.2"), low_body, high_body, low_size))
+        self.assertIsNone(penetration_rejection("SWING_LOW", Decimal("104"), low_body, high_body, low_size))
+        self.assertIsNone(penetration_rejection("SWING_LOW", Decimal("104.5"), low_body, high_body, low_size))
+        self.assertIsNone(penetration_rejection("SWING_LOW", Decimal("105"), low_body, high_body, low_size))
+        self.assertEqual(penetration_fraction("SWING_LOW", Decimal("105"), low_body, high_body, low_size), Decimal(5) / Decimal(3))
+        self.assertEqual(penetration_rejection("SWING_LOW", Decimal("105.00000001"), low_body, high_body, low_size), "BODY_PENETRATION_ABOVE_MAXIMUM")
+        self.assertIsNone(penetration_rejection("SWING_LOW", Decimal("103"), low_body, high_body, low_size))
+        self.assertIsNone(penetration_rejection("SWING_LOW", Decimal("102.5"), low_body, high_body, low_size))
+        self.assertEqual(penetration_rejection("SWING_LOW", Decimal("99"), low_body, high_body, low_size), "PENETRATION_WRONG_DIRECTION")
+
+    def test_confirmed_edges_use_swing_close_close_not_its_body(self) -> None:
+        for close, expected in (("101.5", Decimal("0.5")), ("100", Decimal("1")), ("99", Decimal("4") / Decimal("3")), ("100.5", Decimal("2.5") / Decimal("3"))):
+            high = next(item for item in analyze(self._high(close, interior_high="180")).raw if item.direction == "SWING_HIGH")
+            self.assertEqual(high.close_price, Decimal(close))
+            self.assertEqual(high.penetration_fraction, expected)
+            self.assertEqual(high.peak_1_price, Decimal("180"))
+            self.assertEqual(high.extreme_price, Decimal("180"))
+        one_third = self._high("102", interior_high="180")
+        one_third[7] = _bar(7, "102.5", "102.6", "90", "102")
+        confirmed_third = next(item for item in analyze(one_third).raw if item.direction == "SWING_HIGH")
+        self.assertEqual(confirmed_third.penetration_fraction, Decimal(1) / Decimal(3))
+        five_thirds = next(item for item in analyze(self._high("98", interior_high="180")).raw if item.direction == "SWING_HIGH")
+        self.assertEqual(five_thirds.penetration_fraction, Decimal(5) / Decimal(3))
+        shallow = self._high("102.4")
+        shallow[7] = _bar(7, "102.8", "102.9", "90", "102.4")
+        self.assertFalse(any(item.direction == "SWING_HIGH" for item in analyze(shallow).raw))
+        deep = analyze(self._high("97"))
+        self.assertFalse(any(item.direction == "SWING_HIGH" for item in deep.raw))
+        wide = self._high("101.5")
+        wide[7] = _bar(7, "150", "160", "90", "101.5")
+        narrow = self._high("101.5")
+        narrow[7] = _bar(7, "101.6", "101.7", "90", "101.5")
+        wide_ratio = next(item for item in analyze(wide).raw if item.direction == "SWING_HIGH").penetration_fraction
+        narrow_ratio = next(item for item in analyze(narrow).raw if item.direction == "SWING_HIGH").penetration_fraction
+        self.assertEqual(wide_ratio, narrow_ratio)
+        for close, expected in (("101.5", Decimal("0.5")), ("103", Decimal("1")), ("104", Decimal("4") / Decimal("3"))):
+            low = next(item for item in analyze(self._low(close, interior_low="70")).raw if item.direction == "SWING_LOW")
+            self.assertEqual(low.penetration_fraction, expected)
+            self.assertEqual(low.dip_1_price, Decimal("70"))
+            self.assertEqual(low.extreme_price, Decimal("70"))
+        self.assertEqual(next(item for item in analyze(self._low("101", interior_low="70")).raw if item.direction == "SWING_LOW").penetration_fraction, Decimal(1) / Decimal(3))
+        self.assertEqual(next(item for item in analyze(self._low("105", interior_low="70")).raw if item.direction == "SWING_LOW").penetration_fraction, Decimal(5) / Decimal(3))
+        self.assertFalse(any(item.direction == "SWING_LOW" for item in analyze(self._low("100.5")).raw))
+        self.assertFalse(any(item.direction == "SWING_LOW" for item in analyze(self._low("106")).raw))
+
+    def test_wick_boundary_uses_high_and_low_not_close(self) -> None:
+        self.assertEqual(MINIMUM_BOUNDARY_PERCENT, Decimal("1.00"))
+        self.assertEqual(SWING_HIGH_BOUNDARY_EXTREME_FIELD, "high")
+        self.assertEqual(SWING_LOW_BOUNDARY_EXTREME_FIELD, "low")
+        passed = analyze(self._high("99", interior_close="100.2", interior_high="101"))
+        high = next(item for item in passed.raw if item.direction == "SWING_HIGH")
+        self.assertEqual(high.extreme_price, Decimal("101"))
+        self.assertEqual(high.open_width_percent, Decimal("1"))
+        self.assertNotEqual(high.extreme_price, Decimal("100.2"))
+        changed_high = analyze(self._high("99", interior_close="100.2", interior_high="102"))
+        changed = next(item for item in changed_high.raw if item.direction == "SWING_HIGH")
+        self.assertEqual(changed.extreme_price, Decimal("102"))
+        self.assertNotEqual(changed.open_width_percent, high.open_width_percent)
+        same_high = analyze(self._high("99", interior_close="100.4", interior_high="101"))
+        unchanged = next(item for item in same_high.raw if item.direction == "SWING_HIGH")
+        self.assertEqual(unchanged.open_width_percent, high.open_width_percent)
+        self.assertEqual(unchanged.extreme_price, high.extreme_price)
+        blocked = analyze(self._high("99", interior_close="100.2", interior_high="100.99"))
+        self.assertFalse(any(item.direction == "SWING_HIGH" for item in blocked.raw))
+        low_pass = analyze(self._low("104", interior_close="102", interior_low="101.97"))
+        low = next(item for item in low_pass.raw if item.direction == "SWING_LOW")
+        self.assertEqual(low.extreme_price, Decimal("101.97"))
+        self.assertEqual(low.open_width_percent, Decimal("1"))
+        self.assertNotEqual(low.extreme_price, Decimal("102"))
+        low_changed = next(item for item in analyze(self._low("104", interior_close="102", interior_low="101")).raw if item.direction == "SWING_LOW")
+        self.assertEqual(low_changed.extreme_price, Decimal("101"))
+        self.assertNotEqual(low_changed.open_width_percent, low.open_width_percent)
+        low_same = next(item for item in analyze(self._low("104", interior_close="102.2", interior_low="101.97")).raw if item.direction == "SWING_LOW")
+        self.assertEqual(low_same.open_width_percent, low.open_width_percent)
+        self.assertEqual(low_same.extreme_price, low.extreme_price)
+        self.assertFalse(any(item.direction == "SWING_LOW" for item in analyze(self._low("104", interior_close="102", interior_low="101.98")).raw))
+
+    def test_boundary_window_is_strictly_interior_and_causal(self) -> None:
+        bars = self._high("101.5", interior_close="110")
+        bars[0] = _bar(0, "100", "104", "99", "250")
+        bars[7] = _bar(7, "102", "102", "90", "101.5")
+        high = next(item for item in analyze(bars).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(high.extreme_price, Decimal("111"))
+        self.assertTrue(all(high.open_row < row < high.close_row for row in (high.extreme_row,)))
+        future = self._high("101.5", interior_close="110", future_close="999")
+        future[8] = _bar(8, "100", "999", "1", "999")
+        confirmed = next(item for item in analyze(future).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(confirmed.extreme_price, Decimal("111"))
+        self.assertEqual(confirmed.close_row, 7)
+        early = _quiet(10)
+        early[0] = _bar(0, "100", "104", "99", "103")
+        for index in range(1, 7):
+            early[index] = _bar(index, "100", "101", "99", "100.2")
+        early[4] = _bar(4, "100", "140", "99", "100.2")
+        early[7] = _bar(7, "103", "103", "102.5", "102.5")
+        early[8] = _bar(8, "100", "101", "99", "130")
+        early[9] = _bar(9, "102", "102", "90", "101.5")
+        progressed = next(item for item in analyze(early).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(progressed.close_row, 9)
+        self.assertEqual(progressed.extreme_price, Decimal("140"))
+        record = next(item for item in analyze(early).searches if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertIn("BODY_PENETRATION_BELOW_MINIMUM", record.penetration_rejections)
+        too_deep = _quiet(9)
+        too_deep[0] = _bar(0, "100", "104", "99", "103")
+        for index in range(1, 8):
+            too_deep[index] = _bar(index, "100", "120", "99", "110")
+        too_deep[7] = _bar(7, "102", "102", "80", "90")
+        too_deep[8] = _bar(8, "102", "102", "80", "101.5")
+        recovered = next(item for item in analyze(too_deep).raw if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertEqual(recovered.close_row, 8)
+        deep_record = next(item for item in analyze(too_deep).searches if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertIn("BODY_PENETRATION_ABOVE_MAXIMUM", deep_record.penetration_rejections)
+        stopped = _quiet(9)
+        stopped[0] = _bar(0, "100", "104", "99", "103")
+        for index in range(1, 7):
+            stopped[index] = _bar(index, "100", "100.5", "99", "100.2")
+        stopped[7] = _bar(7, "102", "102", "90", "101.5")
+        stopped[8] = _bar(8, "100", "101", "99", "200")
+        stopped_record = next(item for item in analyze(stopped).searches if item.open_row == 0 and item.direction == "SWING_HIGH")
+        self.assertTrue(stopped_record.binding_failed)
+        self.assertFalse(any(item.open_row == 0 and item.direction == "SWING_HIGH" for item in analyze(stopped).raw))
+
+    def test_limits_colors_primary_parameters_and_repeatability(self) -> None:
+        self.assertEqual(MIN_INTERIOR, 6)
+        self.assertEqual(MAX_INTERIOR, 9)
+        self.assertEqual(RESULT_COLUMNS, (
+            "Swing Type",
+            "Swing Open Open Time Turkey",
+            "Swing Close Open Time Turkey",
+            "Interior Body Reference Time Turkey",
+            "Interior Body Reference Open",
+            "Interior Body Reference High",
+            "Interior Body Reference Low",
+            "Interior Body Reference Close",
+            "Peak 1 Time Turkey",
+            "Peak 1 High",
+            "Peak 2 Time Turkey",
+            "Peak 2 High",
+            "Dip 1 Time Turkey",
+            "Dip 1 Low",
+            "Dip 2 Time Turkey",
+            "Dip 2 Low",
+        ))
+        parameters = dict(USER_PARAMETERS)
+        self.assertEqual(parameters["Required Body Penetration Minimum"], "1/3")
+        self.assertEqual(parameters["Required Body Penetration Maximum"], "5/3")
+        self.assertEqual(parameters["Minimum Boundary Percent"], "1.00%")
+        self.assertEqual(parameters["Swing High Boundary Extreme"], "Highest High")
+        self.assertEqual(parameters["Swing Low Boundary Extreme"], "Lowest Low")
+        self.assertNotIn("Required Body Penetration", parameters)
+        bullish_close = self._high("101.5")
+        bullish_close[7] = _bar(7, "100", "102", "99", "101.5")
+        self.assertFalse(any(item.direction == "SWING_HIGH" and item.open_row == 0 for item in analyze(bullish_close).raw))
+        bars = self._high("101.5")
+        self.assertEqual(signature(analyze(bars)), signature(analyze(bars)))
+        ratio = Decimal(4) / Decimal(3)
+        self.assertEqual(penetration_fraction("SWING_HIGH", Decimal("99"), Decimal("100"), Decimal("103"), Decimal("3")), ratio)
+        self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("99"), Decimal("100"), Decimal("103"), Decimal("3")))
 
 
 if __name__ == "__main__":

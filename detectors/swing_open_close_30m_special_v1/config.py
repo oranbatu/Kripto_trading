@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,7 +17,7 @@ DATASET = Path(r"C:\MarketData\derived\binance\futures\um\perpetual\30m\symbol=B
 
 DETECTOR_NAME = "BTCUSDT 30M Swing Special"
 DETECTOR_VERSION = "BTCUSDT_30M_SPECIAL_SWING_V1"
-CONFIGURATION_VERSION = "STANDARD_6_TO_9_PEAK_DIP_BOUNDARY_1_00_MINIMAL_16_COLUMN_EXCEL_V12"
+CONFIGURATION_VERSION = "STANDARD_6_TO_9_PEAK_DIP_WICK_BOUNDARY_1_00_PENETRATION_1_3_TO_5_3_REFERENCE_LOW_HIGH_COMPATIBILITY_MINIMAL_16_COLUMN_EXCEL_V16"
 FORMATION_CLASS = "STANDARD_30M_SPECIAL"
 TIMEFRAME = "30m"
 SYMBOL = "BTCUSDT"
@@ -40,9 +41,15 @@ MIN_TOTAL = 8
 MAX_TOTAL = 11
 FIRST_CLOSE_OFFSET = 7
 LAST_CLOSE_OFFSET = 10
-MIN_BOUNDARY = Decimal("1.00")
+MINIMUM_BOUNDARY_PERCENT = Decimal("1.00")
+MIN_BOUNDARY = MINIMUM_BOUNDARY_PERCENT
 MAX_BOUNDARY = None
-REQUIRED_FRACTION = Decimal(1) / Decimal(3)
+REQUIRED_BODY_PENETRATION_MIN_RATIO = Fraction(1, 3)
+REQUIRED_BODY_PENETRATION_MAX_RATIO = Fraction(5, 3)
+SWING_HIGH_BOUNDARY_EXTREME_FIELD = "high"
+SWING_LOW_BOUNDARY_EXTREME_FIELD = "low"
+SWING_HIGH_REQUIRE_REFERENCE_LOW_GTE_SWING_CLOSE_CLOSE = True
+SWING_LOW_REQUIRE_REFERENCE_HIGH_LTE_SWING_CLOSE_CLOSE = True
 
 SWING_HIGH = "SWING_HIGH"
 SWING_LOW = "SWING_LOW"
@@ -100,13 +107,16 @@ USER_PARAMETERS = (
     ("Swing Low Swing Close Direction", "Bullish"),
     ("Wrong-Direction Threshold Crossing Binds", "No"),
     ("Search Continues After Wrong Direction", "Yes, Within 6–9 Interior Horizon"),
-    ("Confirmation Rule", "Required Direction, One-Third Body Penetration, And Reference Compatibility When A Pair Exists"),
-    ("Required Body Penetration", "1/3"),
+    ("Confirmation Rule", "Required Direction, Inclusive Body Penetration From 1/3 Through 5/3, And Reference Compatibility When A Pair Exists"),
+    ("Required Body Penetration Minimum", "1/3"),
+    ("Required Body Penetration Maximum", "5/3"),
     ("Swing Open Wicks Used", "No"),
     ("Wick-Only Confirmation", "Not Allowed"),
     ("Full Return to Swing Open Open Required", "No"),
     ("First Eligible Directional Penetration Binding", "Yes, After Reference Compatibility"),
     ("Minimum Boundary Percent", "1.00%"),
+    ("Swing High Boundary Extreme", "Highest High"),
+    ("Swing Low Boundary Extreme", "Lowest Low"),
     ("Maximum Boundary Percent", "None — No Upper Limit"),
     ("Both Minimum Boundaries Required", "Yes"),
     ("Interior Body Reference Enabled", "Yes"),
@@ -123,11 +133,11 @@ USER_PARAMETERS = (
     ("Swing High Reference Direction", "Bearish"),
     ("Swing High Validation Direction", "Bullish"),
     ("Swing High Reference Selection", "Lowest Bearish Close With Immediate Bullish Interior Successor"),
-    ("Swing High Reference-To-Close Rule", "Reference Close >= Swing Close Close"),
+    ("Swing High Reference-To-Close Rule", "Interior Body Reference Low must be greater than or equal to Swing Close Close."),
     ("Swing Low Reference Direction", "Bullish"),
     ("Swing Low Validation Direction", "Bearish"),
     ("Swing Low Reference Selection", "Highest Bullish Close With Immediate Bearish Interior Successor"),
-    ("Swing Low Reference-To-Close Rule", "Reference Close <= Swing Close Close"),
+    ("Swing Low Reference-To-Close Rule", "Interior Body Reference High must be less than or equal to Swing Close Close."),
     ("Swing Open Eligible As Reference", "No"),
     ("Swing Close Eligible As Reference", "No"),
     ("Swing High Peak 1 Segment", "Swing Open Through Interior Body Reference, Inclusive"),
@@ -160,7 +170,7 @@ USER_PARAMETERS = (
     ("Pair Is Primary Selection Input", "No"),
     ("Reference Price Field", "Reference Candle Close"),
     ("Validation Candle Close Used For Selection", "No"),
-    ("Reference Wicks Used", "No"),
+    ("Reference Wicks Used", "Yes, Swing High Reference Low And Swing Low Reference High"),
     ("Doji Eligible In Reference Pair", "No"),
     ("Pair Tie Rule", "Last Chronological Eligible Pair"),
     ("Missing Pair Rejects Swing", "No"),
