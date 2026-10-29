@@ -1,8 +1,13 @@
 """Tests for the separate 30-minute special swing detector."""
 from __future__ import annotations
 
+import json
+import runpy
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from fractions import Fraction
@@ -1487,6 +1492,129 @@ class PenetrationIntervalTests(unittest.TestCase):
         ratio = Decimal(4) / Decimal(3)
         self.assertEqual(penetration_fraction("SWING_HIGH", Decimal("99"), Decimal("100"), Decimal("103"), Decimal("3")), ratio)
         self.assertIsNone(penetration_rejection("SWING_HIGH", Decimal("99"), Decimal("100"), Decimal("103"), Decimal("3")))
+
+
+class CursorLaunchTests(unittest.TestCase):
+    def test_no_argument_runner_keeps_production_defaults(self) -> None:
+        from detectors.swing_open_close_30m_special_v1 import config as cfg
+        import detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector as runner
+
+        source = Path(runner.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("argparse", source)
+        self.assertNotIn("sys.argv", source)
+        self.assertNotIn("input(", source)
+        self.assertIn('if __name__ == "__main__":', source)
+        self.assertIn("raise SystemExit(_run())", source)
+        self.assertIn("load_production()", source)
+        self.assertIn("allocate_revision", source)
+        self.assertIn("_publish", source)
+        self.assertEqual(cfg.SYMBOL, "BTCUSDT")
+        self.assertEqual(cfg.TIMEFRAME, "30m")
+        self.assertEqual(cfg.ANALYSIS_START, datetime(2026, 7, 1, tzinfo=UTC))
+        self.assertEqual(cfg.ANALYSIS_END_OPEN, datetime(2026, 9, 15, 23, 30, tzinfo=UTC))
+        self.assertEqual(
+            cfg.DATASET,
+            Path(r"C:\MarketData\derived\binance\futures\um\perpetual\30m\symbol=BTCUSDT"),
+        )
+        self.assertEqual(cfg.REQUIRED_BODY_PENETRATION_MIN_RATIO, Fraction(1, 3))
+        self.assertEqual(cfg.REQUIRED_BODY_PENETRATION_MAX_RATIO, Fraction(5, 3))
+        self.assertEqual(cfg.MINIMUM_BOUNDARY_PERCENT, Decimal("1.00"))
+        self.assertEqual(cfg.SWING_HIGH_BOUNDARY_EXTREME_FIELD, "high")
+        self.assertEqual(cfg.SWING_LOW_BOUNDARY_EXTREME_FIELD, "low")
+        self.assertEqual(len(RESULT_COLUMNS), 16)
+        self.assertEqual(cfg.DETECTOR_VERSION, "BTCUSDT_30M_SPECIAL_SWING_V1")
+
+    def test_failure_returns_nonzero_and_removes_temporary_workbook(self) -> None:
+        import detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector as runner
+
+        with tempfile.TemporaryDirectory() as folder:
+            temporary = Path(folder)
+            leftover = temporary / "BTCUSDT_30M_Special_Swings_rev05.tmp.xlsx"
+            leftover.write_bytes(b"partial")
+            with mock.patch.object(runner, "TMP_DIR", temporary), mock.patch.object(
+                runner, "load_production", side_effect=RuntimeError("forced failure")
+            ):
+                code = runner._run()
+            self.assertEqual(code, 1)
+            self.assertFalse(leftover.exists())
+
+    def test_direct_file_import_works_from_another_directory(self) -> None:
+        from detectors.swing_open_close_30m_special_v1.config import PROJECT_ROOT
+        import detectors.swing_open_close_30m_special_v1.engine as engine
+
+        runner_file = PROJECT_ROOT / "detectors" / "swing_open_close_30m_special_v1" / "run_swing_open_close_30m_special_detector.py"
+        with tempfile.TemporaryDirectory() as folder:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import runpy\n"
+                    f"runpy.run_path(r'{runner_file}', run_name='cursor_import_check')\n"
+                    "from detectors.swing_open_close_30m_special_v1.config import SYMBOL, TIMEFRAME, ANALYSIS_START, DATASET\n"
+                    "print(SYMBOL)\nprint(TIMEFRAME)\nprint(ANALYSIS_START.date().isoformat())\nprint(DATASET)\n",
+                ],
+                cwd=folder,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("BTCUSDT", completed.stdout)
+        self.assertIn("30m", completed.stdout)
+        self.assertIn("2026-07-01", completed.stdout)
+        self.assertIn("symbol=BTCUSDT", completed.stdout)
+        again = runpy.run_path(str(runner_file), run_name="cursor_import_check")
+        import detectors.swing_open_close_30m_special_v1.engine as reloaded
+
+        self.assertIs(engine, reloaded)
+        self.assertIn("main", again)
+
+    def test_revision_allocator_skips_lock_and_temporary_names(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            desktop = Path(folder)
+            (desktop / "BTCUSDT_30M_Special_Swings_rev04.xlsx").write_bytes(b"x")
+            (desktop / "~$BTCUSDT_30M_Special_Swings_rev04.xlsx").write_bytes(b"x")
+            (desktop / "BTCUSDT_30M_Special_Swings_rev04.tmp.xlsx").write_bytes(b"x")
+            (desktop / "notes.txt").write_text("ignore", encoding="utf-8")
+            revision, target = allocate_revision(desktop)
+        self.assertEqual(revision, 5)
+        self.assertEqual(target.name, "BTCUSDT_30M_Special_Swings_rev05.xlsx")
+        self.assertFalse(target.exists())
+
+    def test_cursor_launch_configuration_uses_the_project_runner(self) -> None:
+        from detectors.swing_open_close_30m_special_v1.config import PROJECT_ROOT
+
+        launch = json.loads((PROJECT_ROOT / ".vscode" / "launch.json").read_text(encoding="utf-8"))
+        settings = json.loads((PROJECT_ROOT / ".vscode" / "settings.json").read_text(encoding="utf-8"))
+        names = [item["name"] for item in launch["configurations"]]
+        self.assertEqual(names[0], "Run BTCUSDT 4H Range Detector")
+        self.assertIn("Run 30m Special Swing Detector", names)
+        chosen = next(item for item in launch["configurations"] if item["name"] == "Run 30m Special Swing Detector")
+        self.assertEqual(chosen["type"], "debugpy")
+        self.assertEqual(chosen["request"], "launch")
+        self.assertEqual(chosen["cwd"], "${workspaceFolder}")
+        self.assertEqual(chosen["console"], "integratedTerminal")
+        self.assertEqual(chosen["args"], [])
+        self.assertTrue(chosen["justMyCode"])
+        self.assertTrue(chosen["program"].endswith("detectors/swing_open_close_30m_special_v1/run_swing_open_close_30m_special_detector.py"))
+        self.assertIn(".venv", chosen["python"])
+        self.assertIn("python.exe", chosen["python"])
+        self.assertIn(".venv", settings["python.defaultInterpreterPath"])
+        self.assertIn("python.exe", settings["python.defaultInterpreterPath"])
+
+    def test_production_fingerprint_is_unchanged(self) -> None:
+        from detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector import load_production
+
+        bars = load_production()["bars"]
+        result = analyze(bars)
+        self.assertEqual(len(bars), 3696)
+        self.assertEqual(bars[0].open_time, datetime(2026, 7, 1, tzinfo=UTC))
+        self.assertEqual(bars[-1].open_time, datetime(2026, 9, 15, 23, 30, tzinfo=UTC))
+        self.assertEqual(sum(item.direction == "SWING_HIGH" for item in result.displayed), 18)
+        self.assertEqual(sum(item.direction == "SWING_LOW" for item in result.displayed), 16)
+        self.assertEqual(len(result.displayed), 34)
+        self.assertEqual(signature(result), "8f52b5a5344a6b18f49e2386f3261dae4b9a9f2e0d646a89aeb1df6f75d8f3d6")
+        self.assertEqual(signature(result), signature(analyze(bars)))
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import time
 import traceback
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -38,6 +39,7 @@ from detectors.swing_open_close_30m_special_v1.config import (
     REPORT_PATH,
     REVISION_PATTERN,
     STEP_MS,
+    SYMBOL,
     TIMEFRAME,
     TMP_DIR,
 )
@@ -228,7 +230,24 @@ def _jsonable(value):
     return value
 
 
+def _cleanup_temporary_workbooks() -> None:
+    if not TMP_DIR.exists():
+        return
+    for path in TMP_DIR.glob("*.tmp.xlsx"):
+        path.unlink(missing_ok=True)
+
+
+def _print_failure(exc: BaseException) -> None:
+    print("STATUS FAILURE")
+    print(f"DETECTOR {DETECTOR_NAME}")
+    print(f"DETECTOR_VERSION {DETECTOR_VERSION}")
+    print(f"CONFIGURATION_VERSION {CONFIGURATION_VERSION}")
+    print(f"ERROR {type(exc).__name__}: {exc}")
+    print(f"LOG {LOG_PATH}")
+
+
 def main() -> int:
+    started = time.perf_counter()
     protected_before = protected_fingerprint()
     loaded = load_production()
     source_before = {str(path.resolve()): fingerprint_file(path) for path in loaded["source_paths"]}
@@ -262,18 +281,36 @@ def main() -> int:
     logging.info("%s %s", DETECTOR_NAME, CONFIGURATION_VERSION)
     logging.info("rows %s workbook %s", len(loaded["bars"]), final_path)
     logging.info("primary %s raw %s", counters["displayed"], counters["raw"])
+    elapsed = time.perf_counter() - started
+    print(f"DETECTOR {DETECTOR_NAME}")
+    print(f"DETECTOR_VERSION {DETECTOR_VERSION}")
+    print(f"CONFIGURATION_VERSION {CONFIGURATION_VERSION}")
+    print(f"SYMBOL {SYMBOL}")
+    print(f"TIMEFRAME {TIMEFRAME}")
+    print(f"ANALYSIS {ANALYSIS_START.date().isoformat()} {ANALYSIS_END_OPEN.date().isoformat()}")
+    print(f"ROWS {len(loaded['bars'])}")
+    print(f"SWING_HIGH {counters['swing_high']}")
+    print(f"SWING_LOW {counters['swing_low']}")
+    print(f"RETAINED {counters['displayed']}")
     print(f"WORKBOOK {final_path}")
-    print(f"PRIMARY {counters['displayed']} HIGH {counters['swing_high']} LOW {counters['swing_low']} RAW {counters['raw']}")
+    print(f"REVISION {final_path.stem.rsplit('rev', 1)[-1]}")
+    print(f"RUNTIME_SECONDS {elapsed:.3f}")
+    print("STATUS SUCCESS")
     print(f"REPORT {REPORT_PATH}")
     print(f"LOG {LOG_PATH}")
-    for path in TMP_DIR.glob("*.tmp.xlsx"):
-        path.unlink(missing_ok=True)
+    _cleanup_temporary_workbooks()
     return 0
 
 
-if __name__ == "__main__":
+def _run() -> int:
     try:
-        raise SystemExit(main())
-    except Exception:
+        return main()
+    except Exception as exc:
+        _print_failure(exc)
         traceback.print_exc()
-        raise SystemExit(1)
+        _cleanup_temporary_workbooks()
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run())

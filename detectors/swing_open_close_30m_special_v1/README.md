@@ -17,3 +17,15 @@ Run from the project root:
 ```text
 .venv\Scripts\python.exe detectors\swing_open_close_30m_special_v1\run_swing_open_close_30m_special_detector.py
 ```
+
+No arguments are required. That command uses the production defaults: BTCUSDT, the 30-minute timeframe, the configured analysis period, and the existing Parquet source. The runner allocates the next workbook revision and does not overwrite an existing workbook. The integrated terminal prints the detector version, counts, workbook path, runtime, and status. The JSON report is `reports\special_30m_swing_report.json` and the log is `logs\special_30m_swing.log`.
+
+To run it in Cursor:
+
+1. Open `detectors\swing_open_close_30m_special_v1\run_swing_open_close_30m_special_detector.py`.
+2. Select `Run > Run Without Debugging`.
+3. If Cursor asks once, select `Run 30m Special Swing Detector`.
+4. Wait for the integrated terminal summary.
+5. Open the newly generated revisioned Excel workbook at the path printed in that summary.
+
+The same no-argument production run is what Cursor's Python `Run Python File` action executes. The launch configuration uses the project `.venv` and the project root as its working directory.
