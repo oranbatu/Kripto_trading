@@ -123,8 +123,8 @@ class TestLoaderRange(unittest.TestCase):
         with self.assertRaises(EmptyRangeError):
             load_candles(
                 "BTCUSDT", "5m",
-                datetime(2026, 9, 16, tzinfo=UTC),
-                datetime(2026, 9, 17, tzinfo=UTC),
+                datetime(2026, 10, 28, tzinfo=UTC),
+                datetime(2026, 10, 29, tzinfo=UTC),
             )
 
     def test_start_equal_end(self) -> None:

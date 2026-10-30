@@ -11,9 +11,9 @@ Scope -- audit these facts here and in the CONFIGURATION block below:
                         download against the official USD-M metadata endpoint
                         ``fapi/v1/exchangeInfo`` (public, no API key). Nothing is substituted.
   * Interval          : 1m ONLY. Every URL, filename, directory and check refers to ``1m``.
-  * Required range    : 2024-01-01T00:00:00Z .. 2026-09-15T23:59:00Z inclusive (candle OPEN times).
+  * Required range    : 2024-01-01T00:00:00Z .. 2026-10-27T23:59:00Z inclusive (candle OPEN times).
   * Archive selection : one official monthly archive per complete month; official daily archives
-                        only for the partial month (2026-09-01 .. 2026-09-15) or when a monthly archive
+                        only for the partial month (2026-10-01 .. 2026-10-27) or when a monthly archive
                         is legitimately unavailable (HTTP 404 for a month at/after the listing date).
   * Incremental runs  : moving RANGE_END_UTC forward extends the dataset in place -- archives already on
                         disk are re-verified and skipped, only the new periods are downloaded, and the
@@ -71,7 +71,7 @@ INTERVAL = "1m"  # the ONLY kline interval this script will ever request
 
 # Fixed inclusive UTC range of required candle OPEN times (must cover complete UTC days).
 RANGE_START_UTC = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-RANGE_END_UTC = datetime(2026, 9, 15, 23, 59, tzinfo=timezone.utc)   # extended from 2026-09-01 (incremental)
+RANGE_END_UTC = datetime(2026, 10, 27, 23, 59, tzinfo=timezone.utc)   # extended from 2026-09-15 (incremental)
 
 # Official sources (public, no API key). ``futures/um`` is the USD-M namespace.
 ARCHIVE_BASE_URL = "https://data.binance.vision/data/futures/um"

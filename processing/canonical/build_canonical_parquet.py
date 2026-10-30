@@ -62,7 +62,7 @@ SYMBOLS: tuple[str, ...] = (
 )
 INTERVAL = "1m"
 RANGE_START_UTC = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-RANGE_END_UTC = datetime(2026, 9, 15, 23, 59, tzinfo=timezone.utc)
+RANGE_END_UTC = datetime(2026, 10, 27, 23, 59, tzinfo=timezone.utc)
 
 PARQUET_COMPRESSION = "zstd"
 PARQUET_COMPRESSION_LEVEL = 3
@@ -71,10 +71,10 @@ SCHEMA_VERSION = "um-perp-1m-canonical-v1"
 DECIMAL_PRECISION = 38
 DECIMAL_SCALE = 8          # observed source max: prices 7 dp, quote volumes 8 dp
 FINGERPRINT_WORKERS = 8
-EXPECTED_ZIP_COUNT = 423
-EXPECTED_ROWS_PER_SYMBOL = 1_424_160
-EXPECTED_ROWS_TOTAL = 12_817_440
-EXPECTED_PARTITION_COUNT = 297   # 9 symbols * 33 months (2024-01 .. 2026-09)
+EXPECTED_ZIP_COUNT = 675  # 297 monthly through 2026-09, plus 135 superseded September daily ZIPs and 243 October 1-27 daily ZIPs
+EXPECTED_ROWS_PER_SYMBOL = 1_484_640
+EXPECTED_ROWS_TOTAL = 13_361_760
+EXPECTED_PARTITION_COUNT = 306   # 9 symbols * 34 months (2024-01 .. 2026-10)
 # =============================================================================
 
 MINUTE_MS = 60_000
@@ -197,7 +197,7 @@ def list_raw_files(raw_root: Path) -> tuple[list[Path], list[Path]]:
 
 def plan_from_disk(raw_root: Path, symbols: tuple[str, ...], range_start: datetime, range_end: datetime) -> tuple[list[Partition], dict]:
     """Build the active-coverage plan from files that actually exist. Monthly archives
-    cover complete months; daily archives cover the partial month 2026-09-01..15.
+    cover complete months; daily archives cover the partial month 2026-10-01..27.
     Never pairs a monthly archive with daily archives for the same minutes."""
     rs, re_ = ms_of(range_start), ms_of(range_end)
     partitions: list[Partition] = []
@@ -984,7 +984,124 @@ def run() -> int:
     return exit_code
 
 
+def validate_published() -> dict:
+    """Read published canonical 1m partitions. Does not write or replace Parquet."""
+    from processing.timeframes.sibling_scope import directory_scope, new_defect_tally
+
+    derived_parent = DATA_ROOT / "derived" / "binance" / "futures" / "um" / "perpetual"
+    scope = directory_scope(derived_parent)
+    files = sorted(p for p in PROCESSED_ROOT.rglob("data.parquet") if p.is_file() and "quarantine" not in p.parts)
+    defects = new_defect_tally()
+    rows_by = {symbol: 0 for symbol in SYMBOLS}
+    files_by = {symbol: 0 for symbol in SYMBOLS}
+    first_ms: dict[str, int] = {}
+    last_ms: dict[str, int] = {}
+    last_close_ms: dict[str, int] = {}
+    schema_failures = 0
+    compression_failures = 0
+    zero = pa.scalar(0, type=pa.int64())
+    dec_zero = pa.scalar(Decimal(0), type=DECIMAL_TYPE)
+    minute = pa.scalar(60_000, type=pa.int64())
+    range_start = pa.scalar(ms_of(RANGE_START_UTC), type=pa.int64())
+    range_end = pa.scalar(ms_of(RANGE_END_UTC), type=pa.int64())
+    for path in files:
+        pf = pq.ParquetFile(path)
+        if list(pf.schema_arrow.names) != list(CANONICAL_SCHEMA.names):
+            schema_failures += 1
+        if pf.metadata.num_row_groups:
+            compression = str(pf.metadata.row_group(0).column(0).compression)
+            if compression.upper() != "ZSTD":
+                compression_failures += 1
+        table = pf.read()
+        n = table.num_rows
+        symbol_values = table.column("symbol").to_pylist()
+        if len(set(symbol_values)) != 1 or symbol_values[0] not in rows_by:
+            schema_failures += 1
+            continue
+        symbol = str(symbol_values[0])
+        rows_by[symbol] += n
+        files_by[symbol] += 1
+        open_ms = pc.cast(table.column("open_time"), pa.int64())
+        close_ms = pc.cast(table.column("close_time"), pa.int64())
+        for column_name in CANONICAL_SCHEMA.names:
+            defects["null_count"] += int(pc.sum(pc.cast(pc.is_null(table.column(column_name)), pa.int64())).as_py() or 0)
+        if n:
+            first_ms[symbol] = min(first_ms.get(symbol, 10**18), int(pc.min(open_ms).as_py()))
+            last_ms[symbol] = max(last_ms.get(symbol, 0), int(pc.max(open_ms).as_py()))
+            last_close_ms[symbol] = max(last_close_ms.get(symbol, 0), int(pc.max(close_ms).as_py()))
+        if n >= 2:
+            diffs = pc.subtract(open_ms.slice(1), open_ms.slice(0, n - 1))
+            defects["duplicate_bucket_count"] += int(pc.sum(pc.cast(pc.equal(diffs, zero), pa.int64())).as_py() or 0)
+            defects["out_of_order_count"] += int(pc.sum(pc.cast(pc.less_equal(diffs, zero), pa.int64())).as_py() or 0)
+            gaps = pc.and_(pc.greater(diffs, zero), pc.not_equal(diffs, minute))
+            defects["missing_bucket_count"] += int(pc.sum(pc.cast(gaps, pa.int64())).as_py() or 0)
+        high = table.column("high")
+        low = table.column("low")
+        open_px = table.column("open")
+        close_px = table.column("close")
+        ohlc_bad = pc.or_(
+            pc.or_(pc.less(high, open_px), pc.less(high, close_px)),
+            pc.or_(pc.greater(low, open_px), pc.or_(pc.greater(low, close_px), pc.less(high, low))),
+        )
+        defects["ohlc_violation_count"] += int(pc.sum(pc.cast(ohlc_bad, pa.int64())).as_py() or 0)
+        for volume_name in ("volume", "quote_volume", "taker_buy_volume", "taker_buy_quote_volume"):
+            defects["negative_volume_count"] += int(
+                pc.sum(pc.cast(pc.less(table.column(volume_name), dec_zero), pa.int64())).as_py() or 0
+            )
+        defects["negative_volume_count"] += int(
+            pc.sum(pc.cast(pc.less(table.column("count"), zero), pa.int64())).as_py() or 0
+        )
+        outside = pc.or_(pc.less(open_ms, range_start), pc.greater(open_ms, range_end))
+        defects["rows_outside_range"] += int(pc.sum(pc.cast(outside, pa.int64())).as_py() or 0)
+    total = sum(rows_by.values())
+    expected_last_open = "2026-10-27T23:59:00Z"
+    expected_last_close_ms = ms_of(datetime(2026, 10, 27, 23, 59, 59, tzinfo=timezone.utc)) + 999
+
+    def _iso_close(ms: Optional[int]) -> Optional[str]:
+        if ms is None:
+            return None
+        stamp = EPOCH + timedelta(milliseconds=int(ms))
+        return stamp.strftime("%Y-%m-%dT%H:%M:%S.") + f"{stamp.microsecond // 1000:03d}Z"
+
+    counts_ok = (
+        len(files) == EXPECTED_PARTITION_COUNT
+        and total == EXPECTED_ROWS_TOTAL
+        and all(rows_by[s] == EXPECTED_ROWS_PER_SYMBOL for s in SYMBOLS)
+        and all(files_by[s] == 34 for s in SYMBOLS)
+        and schema_failures == 0
+        and compression_failures == 0
+        and all(iso_of_ms(first_ms.get(s)) == "2024-01-01T00:00:00Z" for s in SYMBOLS)
+        and all(iso_of_ms(last_ms.get(s)) == expected_last_open for s in SYMBOLS)
+        and all(last_close_ms.get(s) == expected_last_close_ms for s in SYMBOLS)
+        and scope["no_other_timeframes"]
+        and all(value == 0 for value in defects.values())
+    )
+    return {
+        "parquet_files": len(files),
+        "part_files": 0,
+        "rows_by_symbol": rows_by,
+        "total_rows": total,
+        "first_open_time_utc": {s: iso_of_ms(first_ms.get(s)) for s in SYMBOLS},
+        "last_open_time_utc": {s: iso_of_ms(last_ms.get(s)) for s in SYMBOLS},
+        "last_close_time_utc": {s: _iso_close(last_close_ms.get(s)) for s in SYMBOLS},
+        "all_counts_expected": counts_ok,
+        "approved_timeframes_present": scope["approved_timeframes_present"],
+        "unauthorized_timeframes_present": scope["unauthorized_timeframes_present"],
+        "other_timeframes_present": scope["other_timeframes_present"],
+        "no_other_timeframes": scope["no_other_timeframes"],
+        "defects": defects,
+        "schema_failures": schema_failures,
+        "compression_failures": compression_failures,
+    }
+
+
 def main() -> int:
+    if "--validate-only" in sys.argv:
+        project_root = Path(__file__).resolve().parents[2]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        from processing.timeframes.validate_published import validate_timeframe
+        return validate_timeframe("1m")
     return run()
 
 

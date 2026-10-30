@@ -31,7 +31,7 @@ class TestCatalog(unittest.TestCase):
             self.assertFalse(info.unexpected_symbols, tf)
 
     def test_expected_file_counts(self) -> None:
-        expected = {"1m": 297, "5m": 297, "15m": 297, "30m": 297, "1h": 297, "4h": 297, "1d": 27}
+        expected = {"1m": 306, "5m": 306, "15m": 306, "30m": 306, "1h": 306, "4h": 306, "1d": 27}
         for tf, count in expected.items():
             info = self.cat.get_dataset_info(tf, inspect_metadata=False)
             self.assertEqual(info.actual_files, count)

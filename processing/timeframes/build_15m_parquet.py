@@ -26,6 +26,16 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterator, Optional
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+from processing.timeframes.sibling_scope import (  # noqa: E402
+    add_work_defects,
+    assess_derived_siblings,
+    defects_clear,
+    new_defect_tally,
+)
+
 try:
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -56,7 +66,7 @@ SYMBOLS: tuple[str, ...] = (
 SOURCE_INTERVAL = "1m"
 OUTPUT_INTERVAL = "15m"
 RANGE_START_UTC = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-RANGE_END_UTC = datetime(2026, 9, 15, 23, 59, tzinfo=timezone.utc)
+RANGE_END_UTC = datetime(2026, 10, 27, 23, 59, tzinfo=timezone.utc)
 
 PARQUET_COMPRESSION = "zstd"
 PARQUET_COMPRESSION_LEVEL = 3
@@ -70,16 +80,16 @@ BUCKET_MINUTES = 15
 MINUTE_MS = 60_000
 BUCKET_MS = BUCKET_MINUTES * MINUTE_MS  # 900_000
 
-EXPECTED_SOURCE_PARTITIONS = 297
-EXPECTED_OUTPUT_PARTITIONS = 297
-EXPECTED_SOURCE_ROWS_PER_SYMBOL = 1_424_160
-EXPECTED_SOURCE_ROWS_TOTAL = 12_817_440
-EXPECTED_UTC_DAYS = 989
-EXPECTED_OUTPUT_ROWS_PER_SYMBOL = EXPECTED_UTC_DAYS * 96  # 94_944
-EXPECTED_OUTPUT_ROWS_TOTAL = EXPECTED_OUTPUT_ROWS_PER_SYMBOL * 9  # 854_496
-EXPECTED_SEPT_2026_OUTPUT_ROWS = 15 * 96  # 1_440
+EXPECTED_SOURCE_PARTITIONS = 306
+EXPECTED_OUTPUT_PARTITIONS = 306
+EXPECTED_SOURCE_ROWS_PER_SYMBOL = 1_484_640
+EXPECTED_SOURCE_ROWS_TOTAL = 13_361_760
+EXPECTED_UTC_DAYS = 1031
+EXPECTED_OUTPUT_ROWS_PER_SYMBOL = EXPECTED_UTC_DAYS * 96  # 98_976
+EXPECTED_OUTPUT_ROWS_TOTAL = EXPECTED_OUTPUT_ROWS_PER_SYMBOL * 9  # 890_784
+EXPECTED_SEPT_2026_OUTPUT_ROWS = 30 * 96  # 2_880
 EXPECTED_FIRST_OPEN = "2024-01-01T00:00:00Z"
-EXPECTED_LAST_OPEN = "2026-09-15T23:45:00Z"
+EXPECTED_LAST_OPEN = "2026-10-27T23:45:00Z"
 # =============================================================================
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -556,7 +566,7 @@ def aggregate_partition(part: PartitionRef, table: pa.Table) -> PartitionWork:
             ooo += 1  # counted as chronology failure (gap or disorder)
 
     outside = sum(1 for r in rows if r.open_ms < ms_of(RANGE_START_UTC) or r.open_ms > ms_of(RANGE_END_UTC)
-                  or r.open_ms >= ms_of(datetime(2026, 9, 16, tzinfo=timezone.utc)))
+                  or r.open_ms >= ms_of(datetime(2026, 10, 28, tzinfo=timezone.utc)))
 
     fp = fingerprint_rows(rows)
     return PartitionWork(
@@ -666,8 +676,8 @@ def validate_output_rows(part: PartitionRef, rows: list[OutRow], expected_fp: st
             errors.append(f"OHLC violation at {iso_of_ms(r.open_ms)}")
         if r.volume < 0 or r.quote_asset_volume < 0 or r.taker_buy_base_asset_volume < 0 or r.taker_buy_quote_asset_volume < 0 or r.number_of_trades < 0:
             errors.append(f"negative volume/trades at {iso_of_ms(r.open_ms)}")
-        if r.open_ms >= ms_of(datetime(2026, 9, 16, tzinfo=timezone.utc)):
-            errors.append("row on or after 2026-09-16")
+        if r.open_ms >= ms_of(datetime(2026, 10, 28, tzinfo=timezone.utc)):
+            errors.append("row on or after 2026-10-28")
         prev = r
     if rows:
         if iso_of_ms(rows[0].open_ms) and rows[0].open_ms != part.expected_first_open_ms:
@@ -897,11 +907,9 @@ def process_partition(part: PartitionRef, allow_incomplete: bool = False) -> dic
 def independent_scan(source_root: Path, output_root: Path, partitions: list[PartitionRef]) -> dict:
     files = sorted(output_root.rglob("data.parquet")) if output_root.exists() else []
     parts_left = list(output_root.rglob("*.part")) if output_root.exists() else []
-    other_tf = []
-    for tf in ("1h", "4h", "1d", "1m"):
-        p = output_root.parent / tf
-        if tf != "15m" and p.exists():
-            other_tf.append(str(p))
+    scope = assess_derived_siblings(output_root.parent, OUTPUT_INTERVAL)
+    other_tf = scope["other_timeframes_present"]
+    defects = new_defect_tally()
     symbols = sorted({p.parent.parent.parent.name.split("=", 1)[1] for p in files}) if files else []
     rows_by_sym: dict[str, int] = {s: 0 for s in SYMBOLS}
     first_last: dict[str, list[int]] = {}
@@ -915,6 +923,7 @@ def independent_scan(source_root: Path, output_root: Path, partitions: list[Part
             continue
         src = read_1m_table(part.source_path)
         work = aggregate_partition(part, src)
+        add_work_defects(defects, work)
         out = table_to_rows(pq.ParquetFile(part.output_path).read())
         if fingerprint_rows(out) != work.content_fingerprint:
             eq_fail += 1
@@ -951,7 +960,12 @@ def independent_scan(source_root: Path, output_root: Path, partitions: list[Part
             and all(v == EXPECTED_OUTPUT_ROWS_PER_SYMBOL for v in rows_by_sym.values())
             and eq_fail == 0 and align_fail == 0 and src_count_fail == 0
             and not other_tf and not parts_left
+            and defects_clear(defects)
         ),
+        "approved_timeframes_present": scope["approved_timeframes_present"],
+        "unauthorized_timeframes_present": scope["unauthorized_timeframes_present"],
+        "no_other_timeframes": scope["no_other_timeframes"],
+        "defects": defects,
     }
 
 
@@ -1055,14 +1069,14 @@ def run_self_tests() -> None:
     assert rec["source_rows_read"] == 29 * 1440
     log.info("TEST OK: leap February 2024 -> %d 15m rows", rec["output_row_count"])
 
-    # 3. September 2026 partial 15-day month
+    # 3. September 2026 complete month
     sept = copy_real("ETHUSDT", 2026, 9)
     rec = process_partition(sept)
     assert rec["status"] == "created", rec
     assert rec["output_row_count"] == EXPECTED_SEPT_2026_OUTPUT_ROWS, rec["output_row_count"]
-    assert rec["last_open_time_utc"] == EXPECTED_LAST_OPEN
-    assert rec["source_rows_read"] == 15 * 1440
-    log.info("TEST OK: September 2026 partial month -> %d 15m rows last=%s", rec["output_row_count"], rec["last_open_time_utc"])
+    assert rec["last_open_time_utc"] == "2026-09-30T23:45:00Z"
+    assert rec["source_rows_read"] == 30 * 1440
+    log.info("TEST OK: September 2026 complete month -> %d 15m rows last=%s", rec["output_row_count"], rec["last_open_time_utc"])
 
     # 4. Month-boundary continuity Jan last -> Feb first
     jan_last = table_to_rows(pq.ParquetFile(jan.output_path).read())[-1]
@@ -1342,7 +1356,16 @@ def run_production(run_id: str, started: datetime) -> tuple[int, dict]:
     return (1 if bad else 0), report
 
 
+def validate_published() -> dict:
+    """Recompute 15m checks from published Parquet. Does not create or replace partitions."""
+    partitions = discover_partitions(CANONICAL_1M_ROOT, DERIVED_15M_ROOT)
+    return independent_scan(CANONICAL_1M_ROOT, DERIVED_15M_ROOT, partitions)
+
+
 def main() -> int:
+    if "--validate-only" in sys.argv:
+        from processing.timeframes.validate_published import validate_timeframe
+        return validate_timeframe(OUTPUT_INTERVAL)
     started = datetime.now(timezone.utc)
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
     for required in (DATA_ROOT, RAW_ROOT, CANONICAL_1M_ROOT):

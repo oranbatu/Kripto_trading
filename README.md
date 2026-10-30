@@ -58,15 +58,15 @@ Do not move market data into this source tree. Download, processing, and detecto
 
 | Timeframe | Root | Partitioning | Files | Rows/symbol |
 | --- | --- | --- | ---: | ---: |
-| `1m` | `processed/binance/futures/um/perpetual/1m` | symbol/year/month | 297 | 1,424,160 |
-| `5m` | `derived/binance/futures/um/perpetual/5m` | symbol/year/month | 297 | 284,832 |
-| `15m` | `derived/.../15m` | symbol/year/month | 297 | 94,944 |
-| `30m` | `derived/.../30m` | symbol/year/month | 297 | 47,472 |
-| `1h` | `derived/.../1h` | symbol/year/month | 297 | 23,736 |
-| `4h` | `derived/.../4h` | symbol/year/month | 297 | 5,934 |
-| `1d` | `derived/.../1d` | symbol/year | 27 | 989 |
+| `1m` | `processed/binance/futures/um/perpetual/1m` | symbol/year/month | 306 | 1,484,640 |
+| `5m` | `derived/binance/futures/um/perpetual/5m` | symbol/year/month | 306 | 296,928 |
+| `15m` | `derived/.../15m` | symbol/year/month | 306 | 98,976 |
+| `30m` | `derived/.../30m` | symbol/year/month | 306 | 49,488 |
+| `1h` | `derived/.../1h` | symbol/year/month | 306 | 24,744 |
+| `4h` | `derived/.../4h` | symbol/year/month | 306 | 6,186 |
+| `1d` | `derived/.../1d` | symbol/year | 27 | 1,031 |
 
-Inclusive stored UTC range: first open `2024-01-01T00:00:00Z`. Last opens depend on timeframe (for example `1m` last open `2026-09-15T23:59:00Z`, `5m` last open `2026-09-15T23:55:00Z`).
+Inclusive stored UTC range: first open `2024-01-01T00:00:00Z`. Last opens fall on 2026-10-27 (`1m` `2026-10-27T23:59:00Z`, `5m` `2026-10-27T23:55:00Z`, `15m` `2026-10-27T23:45:00Z`, `30m` `2026-10-27T23:30:00Z`, `1h` `2026-10-27T23:00:00Z`, `4h` `2026-10-27T20:00:00Z`, `1d` `2026-10-27T00:00:00Z`). Half-open loads end at `2026-10-28T00:00:00Z`.
 
 Source Parquet files and existing validation reports under `C:\MarketData` are immutable from the data-access layer. The loader never writes into those trees, never resamples, and never repairs gaps.
 

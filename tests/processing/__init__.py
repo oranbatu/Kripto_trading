@@ -1,1 +1,1 @@
-"""Processing tests (none yet)."""
+"""Pipeline processing tests."""
