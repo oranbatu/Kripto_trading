@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -39,11 +40,33 @@ from detectors.price_touch_hierarchy_v1.engine import (
     _GroupBuilder,
 )
 from detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy import (
+    analytical_fingerprint,
     assert_python_write_allowed,
+    batch_exit_code,
+    log_path,
+    main,
     next_revision,
+    report_path,
     revision_filename,
+    scan_revisions,
+    selected_symbols,
 )
-from detectors.price_touch_hierarchy_v1.touch_config import CONFIG, PROJECT_ROOT
+from detectors.price_touch_hierarchy_v1.touch_config import (
+    ALGORITHM_VERSION,
+    CONFIG,
+    DATASET_END,
+    EXCLUSIVE_LOAD_END,
+    EXPECTED_LAST,
+    EXPECTED_PARTITIONS,
+    EXPECTED_ROWS,
+    MIN_TOUCHES,
+    PROJECT_ROOT,
+    RUNNER_VERSION,
+    SYMBOLS,
+    TIMEFRAMES,
+    source_dataset,
+)
+from detectors.price_touch_hierarchy_v1.workbook import validate_saved_workbook, write_workbook
 from detectors.price_touch_hierarchy_v1.workbook import _monthly_rows, _touch_rows
 
 UTC = timezone.utc
@@ -573,6 +596,193 @@ class PriceTouchHierarchyTests(unittest.TestCase):
         keys = [(row[2], row[4], row[3]) for row in rows]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(len(rows), sum(level.touches for level in result.levels["1h"]))
+
+
+class OctoberCoverageTests(unittest.TestCase):
+    def test_69_coverage_constants_use_october_27(self) -> None:
+        self.assertEqual(DATASET_END, datetime(2026, 10, 27, 23, 59, 59, 999000, tzinfo=UTC))
+        self.assertEqual(EXCLUSIVE_LOAD_END, datetime(2026, 10, 28, tzinfo=UTC))
+        self.assertEqual(EXPECTED_ROWS, {"1h": 24744, "4h": 6186, "1d": 1031})
+        self.assertEqual(EXPECTED_PARTITIONS, {"1h": 34, "4h": 34, "1d": 3})
+        self.assertEqual(EXPECTED_LAST["1h"], datetime(2026, 10, 27, 23, tzinfo=UTC))
+        self.assertEqual(EXPECTED_LAST["4h"], datetime(2026, 10, 27, 20, tzinfo=UTC))
+        self.assertEqual(EXPECTED_LAST["1d"], datetime(2026, 10, 27, tzinfo=UTC))
+
+    def test_70_thresholds_and_timeframes_stay_unchanged(self) -> None:
+        self.assertEqual(TIMEFRAMES, ("1h", "4h", "1d"))
+        self.assertEqual(MIN_TOUCHES, {"1h": 40, "4h": 20, "1d": 10})
+
+    def test_71_october_27_rows_are_loaded_and_october_28_is_excluded(self) -> None:
+        from data.exceptions import EmptyRangeError
+        from data.loader import load_candles
+
+        for timeframe, rows in EXPECTED_ROWS.items():
+            loaded = load_candles(
+                "BTCUSDT",
+                timeframe,
+                datetime(2024, 1, 1, tzinfo=UTC),
+                EXCLUSIVE_LOAD_END,
+                warmup_bars=0,
+                precision_mode="exact",
+            )
+            self.assertEqual(loaded.table.num_rows, rows)
+            self.assertEqual(len(set(loaded.source_files)), EXPECTED_PARTITIONS[timeframe])
+            last_open = loaded.table.column("open_time")[rows - 1].as_py()
+            self.assertEqual(last_open, EXPECTED_LAST[timeframe])
+            with self.assertRaises(EmptyRangeError):
+                load_candles(
+                    "BTCUSDT",
+                    timeframe,
+                    datetime(2026, 10, 28, tzinfo=UTC),
+                    datetime(2026, 10, 29, tzinfo=UTC),
+                    warmup_bars=0,
+                    precision_mode="exact",
+                )
+
+    def test_72_september_15_and_16_and_the_month_boundary_remain_readable(self) -> None:
+        from data.loader import load_candles
+
+        september = load_candles(
+            "BTCUSDT",
+            "1h",
+            datetime(2026, 9, 15, tzinfo=UTC),
+            datetime(2026, 9, 17, tzinfo=UTC),
+            warmup_bars=0,
+            precision_mode="exact",
+        )
+        opens = [value.as_py() for value in september.table.column("open_time")]
+        self.assertIn(datetime(2026, 9, 15, 23, tzinfo=UTC), opens)
+        self.assertIn(datetime(2026, 9, 16, 0, tzinfo=UTC), opens)
+        boundary = load_candles(
+            "BTCUSDT",
+            "4h",
+            datetime(2026, 9, 30, 20, tzinfo=UTC),
+            datetime(2026, 10, 1, 8, tzinfo=UTC),
+            warmup_bars=0,
+            precision_mode="exact",
+        )
+        names = " ".join(boundary.source_files).replace("\\", "/")
+        self.assertIn("month=09", names)
+        self.assertIn("month=10", names)
+        self.assertEqual(boundary.table.num_rows, 3)
+
+    def test_73_a_candle_closing_after_the_dataset_end_is_excluded(self) -> None:
+        opened = datetime(2026, 10, 28, tzinfo=UTC)
+        bar = Bar(
+            "1d",
+            0,
+            opened,
+            opened + timedelta(days=1) - timedelta(milliseconds=1),
+            D("1"),
+            D("2"),
+            D("1"),
+            D("1"),
+            D("1"),
+        )
+        kept, excluded = filter_completed([bar], DATASET_END)
+        self.assertEqual(kept, [])
+        self.assertEqual(excluded, 1)
+
+
+class MultiSymbolTests(unittest.TestCase):
+    def test_74_symbol_universe_and_order(self) -> None:
+        import config
+
+        self.assertEqual(
+            SYMBOLS,
+            ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "AAVEUSDT", "NEARUSDT", "LINKUSDT", "LTCUSDT", "OPUSDT", "DOTUSDT"),
+        )
+        self.assertEqual(tuple(config.ALLOWED_SYMBOLS), SYMBOLS)
+        self.assertEqual(selected_symbols(["--all-symbols"]), list(SYMBOLS))
+        self.assertEqual(selected_symbols([]), ["BTCUSDT"])
+        for symbol in SYMBOLS:
+            self.assertEqual(selected_symbols(["--symbol", symbol]), [symbol])
+
+    def test_75_symbol_flags_reject_conflicts_and_unknown_symbols(self) -> None:
+        self.assertEqual(main(["--symbol", "DOGEUSDT"]), 2)
+        self.assertEqual(main(["--symbol", "ETHUSDT", "--all-symbols"]), 2)
+        self.assertEqual(batch_exit_code(["ok", "ok", "ok"]), 0)
+        self.assertEqual(batch_exit_code(["ok", "failed"]), 1)
+        self.assertEqual(batch_exit_code([]), 1)
+
+    def test_76_source_paths_partitions_and_timestamps(self) -> None:
+        import pyarrow.parquet as pq
+
+        for symbol in SYMBOLS:
+            for timeframe, rows in EXPECTED_ROWS.items():
+                folder = source_dataset(symbol)[timeframe]
+                files = sorted(folder.rglob("data.parquet"))
+                self.assertEqual(len(files), EXPECTED_PARTITIONS[timeframe], symbol + timeframe)
+                counted = sum(pq.ParquetFile(path).metadata.num_rows for path in files)
+                self.assertEqual(counted, rows, symbol + timeframe)
+                last = pq.ParquetFile(files[-1]).read(columns=["open_time", "close_time"])
+                self.assertEqual(last.column("open_time")[-1].as_py(), EXPECTED_LAST[timeframe])
+                self.assertLess(last.column("close_time")[-1].as_py(), EXCLUSIVE_LOAD_END)
+
+    def test_77_reports_and_revisions_do_not_cross_symbols(self) -> None:
+        self.assertEqual(len({report_path(symbol) for symbol in SYMBOLS}), 9)
+        self.assertEqual(len({log_path(symbol) for symbol in SYMBOLS}), 9)
+        self.assertNotEqual(report_path("BTCUSDT"), report_path("ETHUSDT"))
+        self.assertNotEqual(log_path("BTCUSDT"), log_path("ETHUSDT"))
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "BTCUSDT_MTF_Most_Touched_Levels_rev02.xlsx").write_bytes(b"btc")
+            (root / "ETHUSDT_MTF_Most_Touched_Levels_rev00.xlsx").write_bytes(b"eth")
+            (root / "btcusdt_MTF_Most_Touched_Levels_rev08.xlsx").write_bytes(b"case")
+            (root / "~$BTCUSDT_MTF_Most_Touched_Levels_rev09.xlsx").write_bytes(b"lock")
+            (root / "BTCUSDT_MTF_Most_Touched_Levels_rev07.xlsx.tmp").write_bytes(b"tmp")
+            (root / "BTCUSDT_MTF_Most_Touched_Levels_rev06.xlsx.bak").write_bytes(b"bak")
+            self.assertEqual(scan_revisions("BTCUSDT", root), [2, 8])
+            self.assertEqual(scan_revisions("ETHUSDT", root), [0])
+            self.assertEqual(next_revision(scan_revisions("ETHUSDT", root)), 1)
+            self.assertEqual(next_revision(scan_revisions("BTCUSDT", root)), 9)
+            (root / "BTCUSDT_MTF_Most_Touched_Levels_rev09.xlsx").write_bytes(b"new")
+            self.assertEqual(next_revision(scan_revisions("BTCUSDT", root)), 10)
+            self.assertEqual(revision_filename(100, "LINKUSDT"), "LINKUSDT_MTF_Most_Touched_Levels_rev100.xlsx")
+            self.assertEqual(MIN_TOUCHES, {"1h": 40, "4h": 20, "1d": 10})
+            self.assertEqual(RUNNER_VERSION, "UM_PERP_MTF_PRICE_TOUCH_HIERARCHY_V1")
+            self.assertEqual(ALGORITHM_VERSION, "BTCUSDT_MTF_PRICE_TOUCH_HIERARCHY_V1")
+
+    def test_78_symbol_state_and_workbook_identity_stay_separate(self) -> None:
+        first = analyze({"1h": _qualified_hour_bars()})
+        remembered = (first.levels["1h"][0].level_id, first.levels["1h"][0].touches, str(first.levels["1h"][0].price))
+        shifted = []
+        for bar in _qualified_hour_bars():
+            shifted.append(Bar(bar.timeframe, bar.row, bar.open_time, bar.close_time, bar.open + D("1000"), bar.high + D("1000"), bar.low + D("1000"), bar.close + D("1000"), bar.volume))
+        second = analyze({"1h": shifted})
+        self.assertEqual((first.levels["1h"][0].level_id, first.levels["1h"][0].touches, str(first.levels["1h"][0].price)), remembered)
+        self.assertNotEqual(first.levels["1h"][0].price, second.levels["1h"][0].price)
+        self.assertIsNot(first, second)
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "ETHUSDT_MTF_Most_Touched_Levels_rev00.xlsx"
+            context = {
+                "symbol": "ETHUSDT",
+                "revision_name": target.name,
+                "diagnostic_rows": [
+                    ["implementation", "symbol", "ETHUSDT"],
+                    ["thresholds", "1h_minimum_completed_candle_touches", 40],
+                    ["thresholds", "4h_minimum_completed_candle_touches", 20],
+                    ["thresholds", "1d_minimum_completed_candle_touches", 10],
+                    ["counts", "duplicate_touch_keys", 0],
+                ],
+            }
+            write_workbook(target, second, context, "ETHUSDT synthetic workbook")
+            values = validate_saved_workbook(target, "ETHUSDT")
+            self.assertEqual(values["symbol"], "ETHUSDT")
+            self.assertNotEqual(values["symbol"], "BTCUSDT")
+
+    def test_79_btc_regression_fingerprints_remain_unchanged(self) -> None:
+        from detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy import load_production
+
+        loaded = load_production("BTCUSDT")
+        september = datetime(2026, 9, 15, 23, 59, 59, 999000, tzinfo=UTC)
+        historical = analyze(loaded["bars"], dataset_end=september)
+        current = analyze(loaded["bars"], dataset_end=DATASET_END)
+        repeated = analyze(loaded["bars"], dataset_end=DATASET_END)
+        self.assertEqual(analytical_fingerprint(historical), "60d33c5db172914b952b0bbafff219ae21c71e932dd3bdc2cd67de8dd4ab8865")
+        self.assertEqual(analytical_fingerprint(current), "72d563eef98a3d85ad777973f398a5da3a6d9ca120013d535a5f4517f05a6501")
+        self.assertEqual(analytical_fingerprint(repeated), analytical_fingerprint(current))
+        self.assertEqual(len(current.groups), 70)
 
 
 def _qualified_hour_bars() -> list[Bar]:

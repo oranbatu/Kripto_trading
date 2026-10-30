@@ -3,4 +3,8 @@
 Importing this package does not load market data and does not run detection.
 """
 
-DETECTOR_VERSION = "BTCUSDT_MTF_PRICE_TOUCH_HIERARCHY_V1"
+from detectors.price_touch_hierarchy_v1.touch_config import (
+    ALGORITHM_VERSION,
+    DETECTOR_VERSION,
+    RUNNER_VERSION,
+)

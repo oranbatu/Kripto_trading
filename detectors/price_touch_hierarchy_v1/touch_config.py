@@ -4,6 +4,7 @@ Thresholds and zone geometry are constants. They are not adjusted after a run.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,8 +17,23 @@ DESKTOP_DIR = Path(r"C:\Users\oranb\Desktop")
 TMP_DIR = PROJECT_ROOT / "tmp" / "price_touch_hierarchy_v1"
 SOURCE_ROOT = Path(r"C:\MarketData\derived\binance\futures\um\perpetual")
 
-DETECTOR_VERSION = "BTCUSDT_MTF_PRICE_TOUCH_HIERARCHY_V1"
+ALGORITHM_VERSION = "BTCUSDT_MTF_PRICE_TOUCH_HIERARCHY_V1"
+RUNNER_VERSION = "UM_PERP_MTF_PRICE_TOUCH_HIERARCHY_V1"
+DETECTOR_VERSION = RUNNER_VERSION
 IMPLEMENTATION_MODE = "PERMANENT_SCRIPT_INSIDE_EXISTING_PROJECT"
+
+SYMBOLS = (
+    "BTCUSDT",
+    "ETHUSDT",
+    "AVAXUSDT",
+    "AAVEUSDT",
+    "NEARUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "OPUSDT",
+    "DOTUSDT",
+)
+DEFAULT_SYMBOL = "BTCUSDT"
 
 TIMEFRAMES = ("1h", "4h", "1d")
 TIMEFRAME_WEIGHT = {"1d": Decimal("4"), "4h": Decimal("2"), "1h": Decimal("1")}
@@ -31,23 +47,34 @@ TOUCH_REJECTION = {
 }
 
 ANALYSIS_START = datetime(2024, 1, 1, tzinfo=timezone.utc)
-DATASET_END = datetime(2026, 9, 15, 23, 59, 59, 999000, tzinfo=timezone.utc)
-EXCLUSIVE_LOAD_END = datetime(2026, 9, 16, tzinfo=timezone.utc)
+DATASET_END = datetime(2026, 10, 27, 23, 59, 59, 999000, tzinfo=timezone.utc)
+EXCLUSIVE_LOAD_END = datetime(2026, 10, 28, tzinfo=timezone.utc)
 
-EXPECTED_ROWS = {"1h": 23736, "4h": 5934, "1d": 989}
+EXPECTED_ROWS = {"1h": 24744, "4h": 6186, "1d": 1031}
+EXPECTED_PARTITIONS = {"1h": 34, "4h": 34, "1d": 3}
 EXPECTED_FIRST = {tf: ANALYSIS_START for tf in TIMEFRAMES}
 EXPECTED_LAST = {
-    "1h": datetime(2026, 9, 15, 23, tzinfo=timezone.utc),
-    "4h": datetime(2026, 9, 15, 20, tzinfo=timezone.utc),
-    "1d": datetime(2026, 9, 15, tzinfo=timezone.utc),
+    "1h": datetime(2026, 10, 27, 23, tzinfo=timezone.utc),
+    "4h": datetime(2026, 10, 27, 20, tzinfo=timezone.utc),
+    "1d": datetime(2026, 10, 27, tzinfo=timezone.utc),
 }
 DURATION_MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
-SOURCE_DATASET = {
-    "1h": SOURCE_ROOT / "1h" / "symbol=BTCUSDT",
-    "4h": SOURCE_ROOT / "4h" / "symbol=BTCUSDT",
-    "1d": SOURCE_ROOT / "1d" / "symbol=BTCUSDT",
-}
+def source_dataset(symbol: str) -> dict[str, Path]:
+    return {timeframe: SOURCE_ROOT / timeframe / f"symbol={symbol}" for timeframe in TIMEFRAMES}
+
+
+def tradingview_symbol(symbol: str) -> str:
+    return f"BINANCE:{symbol}.P"
+
+
+def revision_pattern_text(symbol: str) -> str:
+    return rf"^{re.escape(symbol)}_MTF_Most_Touched_Levels_rev(\d{{2,}})\.xlsx$"
+
+
+SOURCE_DATASET = source_dataset(DEFAULT_SYMBOL)
+REPORTS_DIR = PROJECT_ROOT / "reports"
+LOGS_DIR = PROJECT_ROOT / "logs"
 
 GRID_ANCHOR = Decimal("1.00000000")
 GRID_GROWTH = Decimal("1.001")
@@ -61,7 +88,7 @@ SMOOTHING = (Decimal("0.25"), Decimal("0.50"), Decimal("0.25"))
 TOP_TOUCH_GROUPS = 100
 DISPLAY_TZ = ZoneInfo("Europe/Istanbul")
 
-REVISION_PATTERN_TEXT = r"^BTCUSDT_MTF_Most_Touched_Levels_rev(\d{2,})\.xlsx$"
+REVISION_PATTERN_TEXT = revision_pattern_text(DEFAULT_SYMBOL)
 
 WORKBOOK_SHEETS = (
     "Executive Summary",

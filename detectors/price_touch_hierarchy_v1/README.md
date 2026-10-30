@@ -95,21 +95,41 @@ These labels do not change rank:
 
 # How to run
 
+One runner analyzes each supported USD-M perpetual independently. The symbol
+order is BTCUSDT, ETHUSDT, AVAXUSDT, AAVEUSDT, NEARUSDT, LINKUSDT, LTCUSDT,
+OPUSDT, DOTUSDT. No arguments keep the original BTCUSDT workflow.
+
+Current source coverage for every symbol is `2024-01-01T00:00:00Z` through
+`2026-10-27T23:59:59.999Z`. The loader uses the half-open end
+`2026-10-28T00:00:00Z`. Expected completed rows per symbol are 24,744 (`1h`),
+6,186 (`4h`), and 1,031 (`1d`), from 34, 34, and 3 Hive partitions.
+
 From the existing project root:
 
 ```text
 cd C:\Users\oranb\Desktop\backtest_system
-python -m detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy
+python detectors\price_touch_hierarchy_v1\run_price_touch_hierarchy.py
+python detectors\price_touch_hierarchy_v1\run_price_touch_hierarchy.py --symbol ETHUSDT
+python detectors\price_touch_hierarchy_v1\run_price_touch_hierarchy.py --all-symbols
 ```
+
+`--symbol` and `--all-symbols` cannot be combined. An unknown symbol exits
+with an error and does not fall back to BTCUSDT.
+
+The displayed runner version is `UM_PERP_MTF_PRICE_TOUCH_HIERARCHY_V1`.
+`BTCUSDT_MTF_PRICE_TOUCH_HIERARCHY_V1` remains the analytical algorithm
+identity for the unchanged V1 logic. That historical name does not select
+the symbol being analyzed. Older workbooks are not relabeled.
 
 This package lives inside `backtest_system`. It is not a separate project.
 It does not import or modify the range detector, the swing detector, strategy
 code, ingestion, or Parquet builders.
 
-The workbook is `BTCUSDT_MTF_Most_Touched_Levels_revNN.xlsx` on the Desktop.
-The scan uses `^BTCUSDT_MTF_Most_Touched_Levels_rev(\d{2,})\.xlsx$`. The first
-run is `rev00`. Later runs use maximum existing revision + 1, do not fill
-gaps, and do not overwrite an existing file. Range and swing workbooks are ignored.
+Each workbook is `<SYMBOL>_MTF_Most_Touched_Levels_revNN.xlsx` on the Desktop.
+Revision numbers are independent per symbol. The scan uses
+`^<SYMBOL>_MTF_Most_Touched_Levels_rev(\d{2,})\.xlsx$`. The first workbook for
+a symbol is `rev00`. Later runs use maximum existing revision + 1, do not fill
+gaps, and do not overwrite an existing file. Another symbol's workbooks are ignored.
 
 Tests:
 

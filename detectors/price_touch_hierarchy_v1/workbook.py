@@ -25,10 +25,15 @@ from detectors.price_touch_hierarchy_v1.engine import (
     rejection_reasons,
 )
 from detectors.price_touch_hierarchy_v1.touch_config import (
+    ALGORITHM_VERSION,
     CONFIG,
     CROSS_TF_TOLERANCE,
     DATASET_END,
     DETECTOR_VERSION,
+    EXCLUSIVE_LOAD_END,
+    EXPECTED_PARTITIONS,
+    EXPECTED_ROWS,
+    RUNNER_VERSION,
     FINAL_HALF_WIDTH,
     GRID_ANCHOR,
     GRID_GROWTH,
@@ -288,15 +293,19 @@ def _summary_rows(result: AnalysisResult, context: dict[str, Any]) -> list[list[
         return [item, value]
 
     rows = [
-        add("Symbol", "BTCUSDT"),
-        add("TradingView Symbol", "BINANCE:BTCUSDT.P"),
+        add("Symbol", context["symbol"]),
+        add("TradingView Symbol", f"BINANCE:{context['symbol']}.P"),
         add("Market", "Binance USD-M USDT-margined PERPETUAL"),
         add("Analysis Start UTC", "2024-01-01T00:00:00.000Z"),
         add("Analysis End UTC", iso_utc(DATASET_END)),
+        add("Analysis End Exclusive UTC", iso_utc(EXCLUSIVE_LOAD_END)),
         add("Timeframes", "1h, 4h, 1d"),
         add("1h Source Rows", len(result.bars.get("1h", []))),
         add("4h Source Rows", len(result.bars.get("4h", []))),
         add("1d Source Rows", len(result.bars.get("1d", []))),
+        add("1h Source Partitions", EXPECTED_PARTITIONS["1h"]),
+        add("4h Source Partitions", EXPECTED_PARTITIONS["4h"]),
+        add("1d Source Partitions", EXPECTED_PARTITIONS["1d"]),
         add("1h meaningful-level threshold", "40 completed-candle touches"),
         add("4h meaningful-level threshold", "20 completed-candle touches"),
         add("1d meaningful-level threshold", "10 completed-candle touches"),
@@ -308,6 +317,8 @@ def _summary_rows(result: AnalysisResult, context: dict[str, Any]) -> list[list[
         add("Rejected 1d Candidates", sum(1 for level in result.rejected if level.timeframe == "1d")),
         add("Hierarchy Groups", len(result.groups)),
         add("Detector Version", DETECTOR_VERSION),
+        add("Runner Version", RUNNER_VERSION),
+        add("Analytical Algorithm Version", ALGORITHM_VERSION),
         add("Workbook Revision", context.get("revision_name", "")),
         add("One Candle Touch Rule", "One completed candle contributes at most one touch to the same zone."),
         add("Intrabar Rule", "Intrabar repeated crossings are not counted. The intrabar path is unknown."),
@@ -577,14 +588,21 @@ MONTH_HEADERS = [
 ]
 
 
-def _parameter_rows() -> list[list[Any]]:
+def _parameter_rows(symbol: str) -> list[list[Any]]:
     rows = [
-        ["symbol", "BTCUSDT"],
-        ["tradingview_symbol", "BINANCE:BTCUSDT.P"],
+        ["symbol", symbol],
+        ["tradingview_symbol", f"BINANCE:{symbol}.P"],
         ["market", "Binance USD-M PERPETUAL"],
         ["timeframes", "1h, 4h, 1d"],
         ["analysis_start_utc", "2024-01-01T00:00:00Z"],
-        ["analysis_end_utc", "2026-09-15T23:59:59.999Z"],
+        ["analysis_end_utc", iso_utc(DATASET_END)],
+        ["analysis_end_exclusive_utc", iso_utc(EXCLUSIVE_LOAD_END)],
+        ["1h_source_rows", EXPECTED_ROWS["1h"]],
+        ["4h_source_rows", EXPECTED_ROWS["4h"]],
+        ["1d_source_rows", EXPECTED_ROWS["1d"]],
+        ["1h_source_partitions", EXPECTED_PARTITIONS["1h"]],
+        ["4h_source_partitions", EXPECTED_PARTITIONS["4h"]],
+        ["1d_source_partitions", EXPECTED_PARTITIONS["1d"]],
         ["completed_candles_only", "TRUE"],
         ["maximum_touch_per_candle_per_zone", 1],
         ["intrabar_path_inference", "FORBIDDEN"],
@@ -619,6 +637,9 @@ def _parameter_rows() -> list[list[Any]]:
         ["project_root", str(CONFIG.project_root)],
         ["detector_package", str(CONFIG.package_dir)],
         ["detector_version", DETECTOR_VERSION],
+        ["runner_version", RUNNER_VERSION],
+        ["analytical_algorithm_version", ALGORITHM_VERSION],
+        ["analytical_algorithm_note", "Unchanged V1 logic. The historical algorithm name contains BTCUSDT and does not select the analyzed symbol."],
         ["formula_grid_center", "grid_center(k) = 1.00000000 * 1.001 ** k"],
         ["formula_atomic_bounds", "lower = sqrt(P(k-1)*P(k)); upper = sqrt(P(k)*P(k+1))"],
         ["formula_touch", "high >= zone_lower AND low <= zone_upper, counted once per candle"],
@@ -725,7 +746,7 @@ def write_workbook(path: Path, result: AnalysisResult, context: dict[str, Any], 
         )
 
     parameters = wb.create_sheet("Parameters")
-    _write_table(parameters, ["Parameter", "Value"], _parameter_rows(), {}, "T_Parameters")
+    _write_table(parameters, ["Parameter", "Value"], _parameter_rows(context["symbol"]), {}, "T_Parameters")
 
     diagnostics = wb.create_sheet("Diagnostics")
     _write_table(diagnostics, ["Section", "Key", "Value"], context["diagnostic_rows"], {}, "T_Diagnostics")
@@ -737,15 +758,31 @@ def write_workbook(path: Path, result: AnalysisResult, context: dict[str, Any], 
     if wb.sheetnames != list(WORKBOOK_SHEETS):
         raise RuntimeError(f"sheet order mismatch: {wb.sheetnames}")
     wb.save(path)
+    wb.close()
 
 
-def validate_saved_workbook(path: Path) -> dict[str, Any]:
+def validate_saved_workbook(path: Path, symbol: str | None = None) -> dict[str, Any]:
     wb = load_workbook(path, read_only=True, data_only=False)
     try:
         if tuple(wb.sheetnames) != WORKBOOK_SHEETS:
             raise RuntimeError(f"workbook sheets {wb.sheetnames}")
         if wb.vba_archive is not None:
             raise RuntimeError("workbook contains macros")
+        if symbol is not None:
+            parameters = {
+                str(row[0]): row[1]
+                for row in wb["Parameters"].iter_rows(min_row=2, values_only=True)
+                if row and row[0] is not None
+            }
+            if parameters.get("symbol") != symbol or parameters.get("tradingview_symbol") != f"BINANCE:{symbol}.P":
+                raise RuntimeError(f"workbook symbol identity {parameters.get('symbol')}")
+            summary = {
+                str(row[0]): row[1]
+                for row in wb["Executive Summary"].iter_rows(min_row=2, values_only=True)
+                if row and row[0] is not None
+            }
+            if summary.get("Symbol") != symbol:
+                raise RuntimeError("executive summary symbol mismatch")
         diagnostics = wb["Diagnostics"]
         values = {}
         for row in diagnostics.iter_rows(min_row=2, values_only=True):
@@ -759,6 +796,8 @@ def validate_saved_workbook(path: Path) -> dict[str, Any]:
             raise RuntimeError("4h threshold was not 20")
         if str(values.get("1d_minimum_completed_candle_touches")) != "10":
             raise RuntimeError("1d threshold was not 10")
+        if symbol is not None and values.get("symbol") != symbol:
+            raise RuntimeError(f"diagnostics symbol {values.get('symbol')}")
         links = getattr(wb, "_external_links", []) or []
         for external in links:
             raise RuntimeError(f"external link present: {external}")
