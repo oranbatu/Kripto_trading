@@ -1,12 +1,17 @@
 """Permanent tests for the price-touch hierarchy detector."""
 from __future__ import annotations
 
+import ast
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from detectors.price_touch_hierarchy_v1.engine import (
     Bar,
@@ -48,6 +53,7 @@ from detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy import (
     next_revision,
     report_path,
     revision_filename,
+    run_for_symbol_cli,
     scan_revisions,
     selected_symbols,
 )
@@ -813,6 +819,490 @@ def _qualified_hour_bars() -> list[Bar]:
     for hour in range(13):
         add(5, hour, "99.95", "100.05", "100")
     return bars
+
+
+WRAPPER_MODULES = {
+    "BTCUSDT": "detectors.price_touch_hierarchy_v1.runners.run_btcusdt_price_touch_hierarchy",
+    "ETHUSDT": "detectors.price_touch_hierarchy_v1.runners.run_ethusdt_price_touch_hierarchy",
+    "AVAXUSDT": "detectors.price_touch_hierarchy_v1.runners.run_avaxusdt_price_touch_hierarchy",
+    "AAVEUSDT": "detectors.price_touch_hierarchy_v1.runners.run_aaveusdt_price_touch_hierarchy",
+    "NEARUSDT": "detectors.price_touch_hierarchy_v1.runners.run_nearusdt_price_touch_hierarchy",
+    "LINKUSDT": "detectors.price_touch_hierarchy_v1.runners.run_linkusdt_price_touch_hierarchy",
+    "LTCUSDT": "detectors.price_touch_hierarchy_v1.runners.run_ltcusdt_price_touch_hierarchy",
+    "OPUSDT": "detectors.price_touch_hierarchy_v1.runners.run_opusdt_price_touch_hierarchy",
+    "DOTUSDT": "detectors.price_touch_hierarchy_v1.runners.run_dotusdt_price_touch_hierarchy",
+}
+DEBUG_CONFIGURATION_NAMES = {
+    symbol: f"Debug {symbol} Price Touch Hierarchy" for symbol in WRAPPER_MODULES
+}
+PRESERVED_LAUNCH_NAMES = (
+    "Run BTCUSDT 4H Range Detector",
+    "Run 30m Special Swing Detector",
+    "Run Price Touch Hierarchy Detector",
+)
+
+
+def _tracked_output_stats() -> dict[str, tuple[int, int]]:
+    stats: dict[str, tuple[int, int]] = {}
+    desktop = Path(r"C:\Users\oranb\Desktop")
+    for symbol in SYMBOLS:
+        for path in desktop.glob(f"{symbol}_MTF_Most_Touched_Levels_rev*.xlsx"):
+            if path.name.startswith("~$"):
+                continue
+            item = path.stat()
+            stats[str(path)] = (item.st_size, item.st_mtime_ns)
+    for folder in (PROJECT_ROOT / "reports", PROJECT_ROOT / "logs"):
+        if not folder.exists():
+            continue
+        for path in folder.glob("price_touch_hierarchy_*"):
+            if not path.is_file():
+                continue
+            item = path.stat()
+            stats[str(path)] = (item.st_size, item.st_mtime_ns)
+    source = Path(r"C:\MarketData\derived\binance\futures\um\perpetual")
+    for timeframe in TIMEFRAMES:
+        for symbol in SYMBOLS:
+            for path in (source / timeframe / f"symbol={symbol}").rglob("*.parquet"):
+                item = path.stat()
+                stats[str(path)] = (item.st_size, item.st_mtime_ns)
+    return stats
+
+
+class SymbolRunnerTests(unittest.TestCase):
+    def test_80_exactly_nine_wrapper_modules_exist(self) -> None:
+        folder = PROJECT_ROOT / "detectors" / "price_touch_hierarchy_v1" / "runners"
+        found = sorted(path.name for path in folder.glob("run_*_price_touch_hierarchy.py"))
+        expected = sorted(module.rsplit(".", 1)[-1] + ".py" for module in WRAPPER_MODULES.values())
+        self.assertEqual(found, expected)
+        self.assertEqual(len(found), 9)
+        self.assertTrue((folder / "__init__.py").is_file())
+
+    def test_81_each_wrapper_declares_its_fixed_symbol_and_shared_api(self) -> None:
+        import importlib
+
+        for symbol, module_name in WRAPPER_MODULES.items():
+            source = (PROJECT_ROOT / Path(*module_name.split(".")).with_suffix(".py")).read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            imports = [
+                node for node in tree.body
+                if isinstance(node, ast.ImportFrom) and node.module != "__future__"
+            ]
+            self.assertEqual(len(imports), 1)
+            self.assertEqual(imports[0].module, "detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy")
+            self.assertEqual([alias.name for alias in imports[0].names], ["run_for_symbol_cli"])
+            functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+            self.assertEqual([node.name for node in functions], ["main"])
+            self.assertEqual(functions[0].args.args, [])
+            assigned = {
+                node.targets[0].id: ast.literal_eval(node.value)
+                for node in tree.body
+                if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+            }
+            self.assertEqual(assigned["SYMBOL"], symbol)
+            module = importlib.import_module(module_name)
+            self.assertEqual(module.SYMBOL, symbol)
+            self.assertIs(module.run_for_symbol_cli, run_for_symbol_cli)
+
+    def test_82_wrappers_do_not_duplicate_engine_logic_or_constants(self) -> None:
+        package = PROJECT_ROOT / "detectors" / "price_touch_hierarchy_v1"
+        analyze_defs = []
+        for path in sorted(package.rglob("*.py")):
+            if "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            analyze_defs.extend(
+                path.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "analyze"
+            )
+        self.assertEqual(analyze_defs, ["engine.py"])
+        forbidden = (
+            "analyze(",
+            "write_workbook",
+            "MIN_TOUCHES",
+            "hierarchy_score",
+            "DATASET_END",
+            "load_production",
+            "scan_revisions",
+            "GRID_ANCHOR",
+            "FINAL_HALF_WIDTH",
+            "representative_price",
+        )
+        for module_name in WRAPPER_MODULES.values():
+            source = (PROJECT_ROOT / Path(*module_name.split(".")).with_suffix(".py")).read_text(encoding="utf-8")
+            for token in forbidden:
+                self.assertNotIn(token, source, module_name)
+
+    def test_83_importing_wrappers_does_no_production_work(self) -> None:
+        before = _tracked_output_stats()
+        script = "import importlib; " + "; ".join(
+            f"importlib.import_module({module!r})" for module in WRAPPER_MODULES.values()
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("price_touch_hierarchy_v1 starting", completed.stdout)
+        self.assertNotIn("SUMMARY_JSON", completed.stdout)
+        self.assertNotIn("workbook", completed.stdout.lower())
+        self.assertEqual(_tracked_output_stats(), before)
+
+    def test_84_each_wrapper_calls_the_shared_api_once_for_its_symbol(self) -> None:
+        import importlib
+
+        for symbol, module_name in WRAPPER_MODULES.items():
+            module = importlib.import_module(module_name)
+            with patch.object(module, "run_for_symbol_cli", return_value=0) as shared:
+                self.assertEqual(module.main(), 0)
+            shared.assert_called_once_with(symbol)
+
+    def test_85_a_wrapper_symbol_cannot_be_overridden(self) -> None:
+        import detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy as runner
+        import importlib
+
+        with patch.object(runner, "main", return_value=0) as shared:
+            with patch.object(sys, "argv", ["wrapper", "--symbol", "BTCUSDT", "--all-symbols"]):
+                self.assertEqual(run_for_symbol_cli("ETHUSDT"), 0)
+        shared.assert_called_once_with(["--symbol", "ETHUSDT"])
+        module = importlib.import_module(WRAPPER_MODULES["AVAXUSDT"])
+        with patch.object(module, "run_for_symbol_cli", return_value=0) as shared:
+            with patch.object(sys, "argv", ["wrapper", "--symbol", "BTCUSDT", "--all-symbols"]):
+                self.assertEqual(module.main(), 0)
+        shared.assert_called_once_with("AVAXUSDT")
+        with patch.object(runner, "main") as shared:
+            self.assertEqual(run_for_symbol_cli("DOGEUSDT"), 2)
+        shared.assert_not_called()
+
+    def test_86_shared_success_and_failure_exit_codes_pass_through(self) -> None:
+        import detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy as runner
+        import importlib
+
+        module = importlib.import_module(WRAPPER_MODULES["LTCUSDT"])
+        with patch.object(module, "run_for_symbol_cli", return_value=0):
+            self.assertEqual(module.main(), 0)
+        with patch.object(module, "run_for_symbol_cli", return_value=1):
+            self.assertEqual(module.main(), 1)
+        with patch.object(runner, "main", return_value=0):
+            self.assertEqual(run_for_symbol_cli("BTCUSDT"), 0)
+        with patch.object(runner, "main", return_value=4):
+            self.assertEqual(run_for_symbol_cli("OPUSDT"), 4)
+
+    def test_87_reports_logs_and_revisions_stay_symbol_specific(self) -> None:
+        self.assertEqual(len({report_path(symbol) for symbol in SYMBOLS}), 9)
+        self.assertEqual(len({log_path(symbol) for symbol in SYMBOLS}), 9)
+        for symbol in SYMBOLS:
+            self.assertTrue(report_path(symbol).name.endswith(f"price_touch_hierarchy_{symbol}.json"))
+            self.assertTrue(log_path(symbol).name.endswith(f"price_touch_hierarchy_{symbol}.log"))
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "BTCUSDT_MTF_Most_Touched_Levels_rev03.xlsx").write_bytes(b"btc")
+            (root / "ETHUSDT_MTF_Most_Touched_Levels_rev00.xlsx").write_bytes(b"eth")
+            (root / "AVAXUSDT_MTF_Most_Touched_Levels_rev04.xlsx").write_bytes(b"avax")
+            self.assertEqual(next_revision(scan_revisions("BTCUSDT", root)), 4)
+            self.assertEqual(next_revision(scan_revisions("ETHUSDT", root)), 1)
+            self.assertEqual(next_revision(scan_revisions("AVAXUSDT", root)), 5)
+            self.assertEqual(scan_revisions("DOTUSDT", root), [])
+            self.assertFalse(any(root.glob("*.tmp")))
+
+    def test_88_btc_regression_fingerprints_remain_unchanged(self) -> None:
+        from detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy import load_production
+
+        loaded = load_production("BTCUSDT")
+        september = datetime(2026, 9, 15, 23, 59, 59, 999000, tzinfo=UTC)
+        historical = analyze(loaded["bars"], dataset_end=september)
+        current = analyze(loaded["bars"], dataset_end=DATASET_END)
+        self.assertEqual(
+            analytical_fingerprint(historical),
+            "60d33c5db172914b952b0bbafff219ae21c71e932dd3bdc2cd67de8dd4ab8865",
+        )
+        self.assertEqual(
+            analytical_fingerprint(current),
+            "72d563eef98a3d85ad777973f398a5da3a6d9ca120013d535a5f4517f05a6501",
+        )
+        self.assertFalse(list(Path(r"C:\Users\oranb\Desktop").glob("BTCUSDT_MTF_Most_Touched_Levels_rev04.xlsx")))
+
+    def test_89_generic_runner_selection_remains_unchanged(self) -> None:
+        import detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy as runner
+
+        self.assertEqual(selected_symbols([]), ["BTCUSDT"])
+        self.assertEqual(selected_symbols(["--symbol", "ETHUSDT"]), ["ETHUSDT"])
+        self.assertEqual(selected_symbols(["--all-symbols"]), list(SYMBOLS))
+        def summary_for(symbol: str) -> dict[str, str]:
+            return {"status": "ok", "symbol": symbol}
+
+        def guarded_main(arguments: list[str]):
+            with patch.object(runner, "load_production", return_value={"source_paths": []}) as loaded, \
+                 patch.object(runner, "run_for_symbol", side_effect=summary_for) as ran, \
+                 patch.object(runner, "_write_batch_report") as batch, \
+                 patch.object(runner, "_cleanup"), \
+                 patch.object(runner, "_package_hashes", return_value={"same": "1"}), \
+                 patch.object(runner, "_fingerprint_tree", return_value={"same": "1"}), \
+                 patch.object(runner, "_stray_python_files", return_value=[]):
+                code = runner.main(arguments)
+            return code, loaded, ran, batch
+
+        code, _loaded, ran, batch = guarded_main([])
+        self.assertEqual(code, 0)
+        ran.assert_called_once_with("BTCUSDT")
+        batch.assert_not_called()
+        code, _loaded, ran, batch = guarded_main(["--symbol", "NEARUSDT"])
+        self.assertEqual(code, 0)
+        ran.assert_called_once_with("NEARUSDT")
+        batch.assert_not_called()
+        code, loaded, ran, batch = guarded_main(["--all-symbols"])
+        self.assertEqual(code, 0)
+        self.assertEqual([call.args[0] for call in ran.call_args_list], list(SYMBOLS))
+        self.assertEqual([call.args[0] for call in loaded.call_args_list], list(SYMBOLS))
+        batch.assert_called_once()
+        self.assertEqual(batch.call_args.args[0], list(SYMBOLS))
+
+    def test_90_wrapper_modules_execute_without_publication(self) -> None:
+        before = _tracked_output_stats()
+        for symbol, module_name in WRAPPER_MODULES.items():
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                marker = root / "called.txt"
+                hook = root / "sitecustomize.py"
+                hook.write_text(
+                    "import detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy as runner\n"
+                    "def fake(symbol):\n"
+                    f"    open({str(marker)!r}, 'w', encoding='utf-8').write(symbol)\n"
+                    "    return 0\n"
+                    "runner.run_for_symbol_cli = fake\n",
+                    encoding="utf-8",
+                )
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(root) + os.pathsep + str(PROJECT_ROOT)
+                completed = subprocess.run(
+                    [sys.executable, "-m", module_name],
+                    cwd=PROJECT_ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(marker.read_text(encoding="utf-8"), symbol)
+                self.assertNotIn("--all-symbols", completed.stdout)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            hook = root / "sitecustomize.py"
+            hook.write_text(
+                "import detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy as runner\n"
+                "def fake(symbol):\n"
+                "    return 5\n"
+                "runner.run_for_symbol_cli = fake\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root) + os.pathsep + str(PROJECT_ROOT)
+            completed = subprocess.run(
+                [sys.executable, "-m", WRAPPER_MODULES["DOTUSDT"]],
+                cwd=PROJECT_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 5, completed.stderr)
+        self.assertEqual(_tracked_output_stats(), before)
+
+    def test_91_launch_configurations_map_one_wrapper_each(self) -> None:
+        launch = json.loads((PROJECT_ROOT / ".vscode" / "launch.json").read_text(encoding="utf-8"))
+        settings = json.loads((PROJECT_ROOT / ".vscode" / "settings.json").read_text(encoding="utf-8"))
+        configurations = launch["configurations"]
+        names = [item["name"] for item in configurations]
+        self.assertEqual(len(names), len(set(names)))
+        for name in PRESERVED_LAUNCH_NAMES:
+            self.assertIn(name, names)
+        interpreter = settings["python.defaultInterpreterPath"].replace("/", "\\")
+        self.assertIn(".venv\\Scripts\\python.exe", interpreter)
+        for symbol, name in DEBUG_CONFIGURATION_NAMES.items():
+            matches = [item for item in configurations if item["name"] == name]
+            self.assertEqual(len(matches), 1)
+            item = matches[0]
+            self.assertEqual(item["type"], "debugpy")
+            self.assertEqual(item["request"], "launch")
+            self.assertEqual(item["module"], WRAPPER_MODULES[symbol])
+            self.assertEqual(item["cwd"], "${workspaceFolder}")
+            self.assertEqual(item["console"], "integratedTerminal")
+            self.assertIs(item["justMyCode"], True)
+            self.assertNotIn("stopOnEntry", item)
+            self.assertNotIn("port", item)
+            self.assertIn(".venv", item["python"].replace("\\", "/"))
+            self.assertNotIn("program", item)
+            rendered = json.dumps(item)
+            self.assertNotIn("--all-symbols", rendered)
+            self.assertNotIn("--symbol", rendered)
+        for item in configurations:
+            self.assertNotIn("--all-symbols", json.dumps(item.get("args", [])))
+        gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(".vscode/", gitignore)
+
+    def test_92_runner_tests_leave_no_desktop_revision_or_temp_workbook(self) -> None:
+        desktop = Path(r"C:\Users\oranb\Desktop")
+        self.assertFalse(list(desktop.glob("BTCUSDT_MTF_Most_Touched_Levels_rev04.xlsx")))
+        self.assertFalse(list(desktop.glob("~$*_MTF_Most_Touched_Levels_rev*.xlsx")))
+        temporary = PROJECT_ROOT / "tmp" / "price_touch_hierarchy_v1"
+        self.assertFalse(temporary.exists())
+
+
+class DesktopOutputTests(unittest.TestCase):
+    def test_93_known_folder_resolves_the_visible_desktop(self) -> None:
+        from detectors.price_touch_hierarchy_v1.desktop_output import resolve_visible_desktop
+
+        location = resolve_visible_desktop()
+        self.assertEqual(location.method, "known_folder")
+        self.assertTrue(location.path.is_absolute())
+        self.assertTrue(location.path.is_dir())
+        self.assertNotEqual(location.path.resolve(), PROJECT_ROOT.resolve())
+        self.assertFalse(PROJECT_ROOT.resolve() in location.path.resolve().parents)
+
+    def test_94_local_onedrive_unicode_and_environment_paths(self) -> None:
+        from detectors.price_touch_hierarchy_v1.desktop_output import (
+            DesktopResolutionError,
+            KnownFolderUnavailable,
+            resolve_visible_desktop,
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            local = root / "Desktop"
+            local.mkdir()
+            onedrive = root / "OneDrive" / "Desktop"
+            onedrive.mkdir(parents=True)
+            spaced = root / "Visible Desktop" / "Masaüstü"
+            spaced.parent.mkdir()
+            expanded = root / "Expanded Desktop"
+            expanded.mkdir()
+            os.environ["PTH_DESKTOP_TEST"] = str(expanded)
+            self.addCleanup(os.environ.pop, "PTH_DESKTOP_TEST", None)
+            self.assertEqual(resolve_visible_desktop(known_folder=lambda: str(local)).path, local.resolve())
+            self.assertEqual(
+                resolve_visible_desktop(known_folder=lambda: str(onedrive)).method,
+                "known_folder",
+            )
+            self.assertEqual(resolve_visible_desktop(known_folder=lambda: str(onedrive)).path, onedrive.resolve())
+            created = resolve_visible_desktop(known_folder=lambda: str(spaced))
+            self.assertTrue(created.path.is_dir())
+            self.assertEqual(created.path, spaced.resolve())
+            self.assertEqual(resolve_visible_desktop(known_folder=lambda: "%PTH_DESKTOP_TEST%").path, expanded.resolve())
+            file_path = root / "not-a-directory"
+            file_path.write_text("x", encoding="utf-8")
+            with self.assertRaises(DesktopResolutionError):
+                resolve_visible_desktop(known_folder=lambda: str(file_path))
+            with self.assertRaises(DesktopResolutionError):
+                resolve_visible_desktop(known_folder=lambda: str(PROJECT_ROOT))
+            with self.assertRaises(DesktopResolutionError):
+                resolve_visible_desktop(known_folder=lambda: str(PROJECT_ROOT / "reports"))
+
+            def unavailable() -> str:
+                raise KnownFolderUnavailable("api missing")
+
+            registry_calls = []
+
+            def registry() -> str:
+                registry_calls.append("called")
+                return str(onedrive)
+
+            with self.assertRaises(DesktopResolutionError):
+                resolve_visible_desktop(known_folder=lambda: str(PROJECT_ROOT), registry_desktop=registry)
+            self.assertEqual(registry_calls, [])
+            redirected = resolve_visible_desktop(known_folder=unavailable, registry_desktop=lambda: str(onedrive))
+            self.assertEqual(redirected.method, "user_shell_folders")
+            self.assertEqual(redirected.path, onedrive.resolve())
+            (root / "home").mkdir()
+            home = resolve_visible_desktop(
+                known_folder=unavailable,
+                registry_desktop=unavailable,
+                home=root / "home",
+            )
+            self.assertEqual(home.method, "home_desktop")
+            self.assertTrue((root / "home" / "Desktop").is_dir())
+
+    def test_95_revision_allocation_scans_only_the_selected_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "AVAXUSDT_MTF_Most_Touched_Levels_rev00.xlsx").write_bytes(b"old")
+            (root / "AVAXUSDT_MTF_Most_Touched_Levels_rev02.xlsx").write_bytes(b"gap")
+            (root / "LINKUSDT_MTF_Most_Touched_Levels_rev100.xlsx").write_bytes(b"high")
+            (root / "btcusdt_mtf_most_touched_levels_rev07.xlsx").write_bytes(b"case")
+            (root / "ETHUSDT_MTF_Most_Touched_Levels_rev04.xlsx").write_bytes(b"other")
+            (root / "~$AVAXUSDT_MTF_Most_Touched_Levels_rev09.xlsx").write_bytes(b"lock")
+            (root / "AVAXUSDT_MTF_Most_Touched_Levels_rev08.xlsx.tmp").write_bytes(b"tmp")
+            (root / "AVAXUSDT_MTF_Most_Touched_Levels_rev06.xlsx.part").write_bytes(b"part")
+            (root / "AVAXUSDT_MTF_Most_Touched_Levels_rev05.xlsx.bak").write_bytes(b"bak")
+            (root / "notes.xlsx").write_bytes(b"unrelated")
+            self.assertEqual(next_revision(scan_revisions("DOTUSDT", root)), 0)
+            self.assertEqual(next_revision(scan_revisions("AVAXUSDT", root)), 3)
+            self.assertEqual(scan_revisions("AVAXUSDT", root), [0, 2])
+            self.assertEqual(next_revision(scan_revisions("LINKUSDT", root)), 101)
+            self.assertEqual(revision_filename(101, "LINKUSDT"), "LINKUSDT_MTF_Most_Touched_Levels_rev101.xlsx")
+            self.assertEqual(scan_revisions("BTCUSDT", root), [7])
+            self.assertEqual(scan_revisions("ETHUSDT", root), [4])
+            self.assertEqual((root / "AVAXUSDT_MTF_Most_Touched_Levels_rev00.xlsx").read_bytes(), b"old")
+
+    def test_96_destination_that_appears_allocates_the_next_revision(self) -> None:
+        import detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy as runner
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            desktop = root / "desktop"
+            temporary = root / "tmp"
+            desktop.mkdir()
+            temporary.mkdir()
+            original = desktop / "ETHUSDT_MTF_Most_Touched_Levels_rev00.xlsx"
+            original.write_bytes(b"keep")
+            context = {
+                "symbol": "ETHUSDT",
+                "existing_revisions": [0],
+                "planned_revision": 1,
+                "desktop_dir": desktop,
+                "desktop_method": "known_folder",
+                "temporary_dir": temporary,
+            }
+
+            def fake_write(path: Path, _result, _context, _readme) -> None:
+                path.write_bytes(b"temporary")
+                if path.name.endswith("rev01.xlsx"):
+                    (desktop / "ETHUSDT_MTF_Most_Touched_Levels_rev01.xlsx").write_bytes(b"raced")
+
+            with patch.object(runner, "write_workbook", fake_write), \
+                 patch.object(runner, "_validate_workbook_container"), \
+                 patch.object(runner, "_diagnostic_rows", return_value=[]):
+                revision, final = runner._commit_workbook(None, context, "readme")
+            self.assertEqual(revision, 2)
+            self.assertEqual(final.name, "ETHUSDT_MTF_Most_Touched_Levels_rev02.xlsx")
+            self.assertEqual(original.read_bytes(), b"keep")
+            self.assertEqual((desktop / "ETHUSDT_MTF_Most_Touched_Levels_rev01.xlsx").read_bytes(), b"raced")
+            self.assertFalse(list(temporary.glob("*.xlsx")))
+
+    def test_97_wrappers_share_one_resolver_and_keep_fixed_symbols(self) -> None:
+        import detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy as runner
+        from detectors.price_touch_hierarchy_v1.desktop_output import DesktopLocation
+
+        for symbol, module_name in WRAPPER_MODULES.items():
+            source = (PROJECT_ROOT / Path(*module_name.split(".")).with_suffix(".py")).read_text(encoding="utf-8")
+            self.assertNotIn("SHGetKnownFolderPath", source)
+            self.assertNotIn("visible_desktop", source)
+            self.assertNotIn("desktop_dir", source)
+            self.assertIn(f'SYMBOL = "{symbol}"', source)
+        self.assertEqual(selected_symbols([]), ["BTCUSDT"])
+        self.assertEqual(selected_symbols(["--symbol", "AVAXUSDT"]), ["AVAXUSDT"])
+        self.assertEqual(selected_symbols(["--all-symbols"]), list(SYMBOLS))
+        with tempfile.TemporaryDirectory() as folder:
+            desktop = Path(folder)
+            (desktop / "AVAXUSDT_MTF_Most_Touched_Levels_rev01.xlsx").write_bytes(b"avax")
+            (desktop / "BTCUSDT_MTF_Most_Touched_Levels_rev03.xlsx").write_bytes(b"btc")
+            location = DesktopLocation(desktop, "known_folder")
+            with patch.object(runner, "visible_desktop", return_value=location):
+                self.assertEqual(runner.scan_revisions("AVAXUSDT"), [1])
+                self.assertEqual(runner.scan_revisions("BTCUSDT"), [3])
+                self.assertEqual(next_revision(runner.scan_revisions("AVAXUSDT")), 2)
 
 
 if __name__ == "__main__":

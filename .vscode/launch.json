@@ -1,0 +1,175 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Detector Control Center",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "tools.detector_control_center.app",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "presentation": {
+        "group": "01-control-center",
+        "order": 1
+      }
+    },
+    {
+      "name": "Run BTCUSDT 4H Range Detector",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/detectors/range_detector_4h_v1/run_range_detector_4h.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": [],
+      "justMyCode": true
+    },
+    {
+      "name": "Run 30m Special Swing Detector",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/detectors/swing_open_close_30m_special_v1/run_swing_open_close_30m_special_detector.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": [],
+      "justMyCode": true
+    },
+    {
+      "name": "Run Price Touch Hierarchy Detector",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/detectors/price_touch_hierarchy_v1/run_price_touch_hierarchy.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": [],
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug BTCUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_btcusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug ETHUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_ethusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug AVAXUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_avaxusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug AAVEUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_aaveusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug NEARUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_nearusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug LINKUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_linkusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug LTCUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_ltcusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug OPUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_opusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug DOTUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_dotusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    }
+  ]
+}

@@ -116,6 +116,38 @@ python detectors\price_touch_hierarchy_v1\run_price_touch_hierarchy.py --all-sym
 `--symbol` and `--all-symbols` cannot be combined. An unknown symbol exits
 with an error and does not fall back to BTCUSDT.
 
+Nine thin wrappers live in `runners/` and call the same `run_for_symbol_cli`
+function. They do not contain a second copy of the touch, zone, hierarchy,
+ranking, workbook, or revision logic. Each wrapper is fixed to one symbol:
+
+```text
+python -m detectors.price_touch_hierarchy_v1.runners.run_btcusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_ethusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_avaxusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_aaveusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_nearusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_linkusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_ltcusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_opusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_dotusdt_price_touch_hierarchy
+```
+
+Run these from the project root with `.venv\Scripts\python.exe`. A wrapper
+ignores `--symbol` and `--all-symbols`, so it cannot be pointed at another
+market. Importing a wrapper does not read Parquet data or create a workbook.
+Executing one publishes only that symbol's next Desktop revision and writes
+only `reports\price_touch_hierarchy_<SYMBOL>.json` and
+`logs\price_touch_hierarchy_<SYMBOL>.log`. The batch report is written only
+by `--all-symbols`.
+
+Cursor Run and Debug can launch each wrapper separately. The local
+configuration names are `Debug BTCUSDT Price Touch Hierarchy` through
+`Debug DOTUSDT Price Touch Hierarchy`. Select one and press F5. The session
+uses the project virtual environment and the integrated terminal. A real debug
+run is a production run: it creates that symbol's next workbook revision.
+`.vscode/launch.json` and `.vscode/settings.json` stay local because `.vscode/`
+is ignored by Git. The wrapper scripts themselves are project source.
+
 The displayed runner version is `UM_PERP_MTF_PRICE_TOUCH_HIERARCHY_V1`.
 `BTCUSDT_MTF_PRICE_TOUCH_HIERARCHY_V1` remains the analytical algorithm
 identity for the unchanged V1 logic. That historical name does not select
@@ -125,11 +157,19 @@ This package lives inside `backtest_system`. It is not a separate project.
 It does not import or modify the range detector, the swing detector, strategy
 code, ingestion, or Parquet builders.
 
-Each workbook is `<SYMBOL>_MTF_Most_Touched_Levels_revNN.xlsx` on the Desktop.
-Revision numbers are independent per symbol. The scan uses
+Each workbook is `<SYMBOL>_MTF_Most_Touched_Levels_revNN.xlsx` on the Windows
+Known Folder Desktop. `SHGetKnownFolderPath` with `FOLDERID_Desktop` resolves
+that folder, including a redirected OneDrive Desktop. The User Shell Folders
+registry value and the home `Desktop` folder are used only when the Known
+Folder API cannot be called. A resolved path inside this project is rejected.
+Revision numbers are tracked separately for each symbol inside the resolved
+folder only. Older copies in another directory are left untouched and are not
+combined into the revision scan. The scan uses
 `^<SYMBOL>_MTF_Most_Touched_Levels_rev(\d{2,})\.xlsx$`. The first workbook for
-a symbol is `rev00`. Later runs use maximum existing revision + 1, do not fill
-gaps, and do not overwrite an existing file. Another symbol's workbooks are ignored.
+a symbol in that folder is `rev00`. Later runs use maximum existing revision
++ 1, do not fill gaps, and do not overwrite an existing file. Another symbol's
+workbooks are ignored. All nine wrappers and the generic runner share this
+one output resolver and the one analytical engine.
 
 Tests:
 

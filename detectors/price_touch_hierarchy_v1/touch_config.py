@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parents[1]
+# Historical literal only. Publication uses the Windows Known Folder Desktop,
+# which may be this folder or a redirected folder such as OneDrive\Desktop.
 DESKTOP_DIR = Path(r"C:\Users\oranb\Desktop")
 TMP_DIR = PROJECT_ROOT / "tmp" / "price_touch_hierarchy_v1"
 SOURCE_ROOT = Path(r"C:\MarketData\derived\binance\futures\um\perpetual")

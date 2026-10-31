@@ -27,7 +27,8 @@ credentials*.json
 secrets*.json
 
 # IDE and OS files
-.vscode/
+.vscode/*
+!.vscode/launch.json
 .idea/
 .DS_Store
 Thumbs.db

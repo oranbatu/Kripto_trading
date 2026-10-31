@@ -26,6 +26,7 @@ import pyarrow as pa
 import config
 from data.catalog import fingerprint_file
 from data.loader import load_candles
+from detectors.price_touch_hierarchy_v1.desktop_output import visible_desktop
 from detectors.price_touch_hierarchy_v1.engine import (
     Bar,
     SourceValidationError,
@@ -41,6 +42,7 @@ from detectors.price_touch_hierarchy_v1.touch_config import (
     CONFIG,
     DATASET_END,
     DEFAULT_SYMBOL,
+    DESKTOP_DIR,
     DETECTOR_VERSION,
     DURATION_MS,
     EXCLUSIVE_LOAD_END,
@@ -97,6 +99,19 @@ def batch_exit_code(statuses: list[str]) -> int:
     if not statuses or any(status != "ok" for status in statuses):
         return 1
     return 0
+
+
+def run_for_symbol_cli(symbol: str) -> int:
+    """Run one fixed symbol through the shared production runner.
+
+    The symbol argument is authoritative. ``sys.argv`` is ignored, so a
+    symbol-specific wrapper cannot be redirected with ``--symbol`` or
+    ``--all-symbols``.
+    """
+    if symbol not in SYMBOLS:
+        print(f"SYMBOL_SELECTION_FAILED unsupported symbol {symbol}", flush=True)
+        return 2
+    return main(["--symbol", symbol])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,7 +176,25 @@ def run_for_symbol(symbol: str) -> dict[str, Any]:
     if symbol not in SYMBOLS:
         raise SymbolSelectionError(f"unsupported symbol {symbol}")
     started = time.perf_counter()
-    existing_revisions = scan_revisions(symbol)
+    location = visible_desktop()
+    print(f"{symbol} desktop {location.path}", flush=True)
+    print(f"{symbol} desktop method {location.method}", flush=True)
+    existing_revisions = scan_revisions(symbol, location.path)
+    print(
+        f"{symbol} existing revisions "
+        + (",".join(f"{item:02d}" for item in existing_revisions) or "NONE"),
+        flush=True,
+    )
+    if os.path.normcase(str(location.path)) != os.path.normcase(str(DESKTOP_DIR)):
+        legacy = scan_revisions(symbol, DESKTOP_DIR) if DESKTOP_DIR.is_dir() else []
+        print(
+            f"{symbol} legacy desktop {DESKTOP_DIR} revisions "
+            + (",".join(f"{item:02d}" for item in legacy) or "NONE")
+            + " ignored",
+            flush=True,
+        )
+    planned_revision = next_revision(existing_revisions)
+    print(f"{symbol} planned revision rev{planned_revision:02d}", flush=True)
     loaded = load_production(symbol)
     source_before = {path: fingerprint_file(Path(path)) for path in loaded["source_paths"]}
     print(
@@ -169,6 +202,11 @@ def run_for_symbol(symbol: str) -> dict[str, Any]:
         + " ".join(f"{timeframe}={len(loaded['bars'][timeframe])}" for timeframe in TIMEFRAMES),
         flush=True,
     )
+    for timeframe in TIMEFRAMES:
+        print(
+            f"{symbol} source path {timeframe}={loaded['provenance'][timeframe]['source_path']}",
+            flush=True,
+        )
     result = analyze(loaded["bars"], dataset_end=DATASET_END)
     digest = analytical_fingerprint(result)
     confirmation = analyze(loaded["bars"], dataset_end=DATASET_END)
@@ -182,6 +220,9 @@ def run_for_symbol(symbol: str) -> dict[str, Any]:
     canonical = highest_canonical_group(result.groups)
     context = _context(symbol, result, loaded, source_before, existing_revisions, persistent, canonical)
     context["analytical_fingerprint"] = digest
+    context["desktop_dir"] = location.path
+    context["desktop_method"] = location.method
+    context["planned_revision"] = planned_revision
     readme = (CONFIG.package_dir / "README.md").read_text(encoding="utf-8")
     symbol_tmp = TMP_DIR / symbol
     symbol_tmp.mkdir(parents=True, exist_ok=True)
@@ -191,11 +232,18 @@ def run_for_symbol(symbol: str) -> dict[str, Any]:
     except RuntimeError:
         shutil.rmtree(symbol_tmp, ignore_errors=True)
         raise
+    print(f"{symbol} final revision rev{revision:02d}", flush=True)
+    print(f"{symbol} workbook {final_path}", flush=True)
     summary = _summary(symbol, result, final_path, revision, existing_revisions, persistent, canonical, digest)
     summary["runtime_seconds"] = round(time.perf_counter() - started, 3)
     summary["workbook_sha256"] = _file_sha256(final_path)
     summary["workbook_size"] = final_path.stat().st_size
+    summary["desktop_dir"] = str(location.path)
+    summary["desktop_resolution_method"] = location.method
+    summary["planned_revision"] = planned_revision
     summary["status"] = "ok"
+    print(f"{symbol} workbook size {summary['workbook_size']}", flush=True)
+    print(f"{symbol} status {summary['status']}", flush=True)
     _write_symbol_outputs(symbol, summary)
     del result
     del loaded
@@ -338,7 +386,7 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def scan_revisions(symbol: str = DEFAULT_SYMBOL, directory: Path | None = None) -> list[int]:
-    folder = CONFIG.desktop_dir if directory is None else Path(directory)
+    folder = visible_desktop().path if directory is None else Path(directory)
     found = []
     if not folder.exists():
         return found
@@ -370,10 +418,12 @@ def revision_filename(revision: int, symbol: str = DEFAULT_SYMBOL) -> str:
 
 def _commit_workbook(result, context: dict[str, Any], readme: str) -> tuple[int, Path]:
     symbol = context["symbol"]
-    desktop = Path(context.get("desktop_dir", CONFIG.desktop_dir))
+    desktop = Path(context["desktop_dir"]) if context.get("desktop_dir") else visible_desktop().path
     temporary_dir = Path(context.get("temporary_dir", TMP_DIR / symbol))
     temporary_dir.mkdir(parents=True, exist_ok=True)
-    planned = next_revision(context["existing_revisions"])
+    if context.get("planned_revision") is None:
+        context["planned_revision"] = next_revision(context["existing_revisions"])
+    planned = int(context["planned_revision"])
     while True:
         name = revision_filename(planned, symbol)
         final_path = desktop / name
@@ -382,6 +432,7 @@ def _commit_workbook(result, context: dict[str, Any], readme: str) -> tuple[int,
             continue
         temporary = temporary_dir / name
         context["revision_name"] = name
+        context["final_workbook_path"] = str(final_path)
         context["diagnostic_rows"] = _diagnostic_rows(result, context)
         try:
             write_workbook(temporary, result, context, readme)
@@ -448,7 +499,12 @@ def _diagnostic_rows(result, context: dict[str, Any]) -> list[list[Any]]:
     add("implementation", "runtime_python", context["runtime"]["python"])
     add("implementation", "runtime_pyarrow", context["runtime"]["pyarrow"])
     add("implementation", "runtime_openpyxl", context["runtime"]["openpyxl"])
+    add("implementation", "workbook_output_directory", str(context.get("desktop_dir", "")))
+    add("implementation", "desktop_resolution_method", context.get("desktop_method", ""))
     add("implementation", "workbook_revision", context["revision_name"])
+    planned = context.get("planned_revision")
+    add("implementation", "planned_revision", "" if planned is None else f"{int(planned):02d}")
+    add("implementation", "final_workbook_path", str(context.get("final_workbook_path", "")))
     add("implementation", "existing_matching_revisions", ",".join(f"{item:02d}" for item in context["existing_revisions"]) or "NONE")
     add("implementation", "separate_project_created", "FALSE")
     add("thresholds", "1h_minimum_completed_candle_touches", 40)
@@ -684,7 +740,7 @@ def _package_hashes() -> dict[str, str]:
 
 def _stray_python_files() -> list[str]:
     stray = []
-    desktop = CONFIG.desktop_dir
+    desktop = visible_desktop().path
     for file in desktop.glob("*.py"):
         stray.append(str(file))
     return stray
@@ -733,6 +789,8 @@ def _write_symbol_outputs(symbol: str, summary: dict[str, Any]) -> None:
     lines = [
         f"symbol={symbol}",
         f"status={summary['status']}",
+        f"desktop={summary.get('desktop_dir', '')}",
+        f"desktop_method={summary.get('desktop_resolution_method', '')}",
         f"revision={summary['revision']}",
         f"workbook={summary['workbook']}",
         f"sha256={summary['workbook_sha256']}",
@@ -794,7 +852,7 @@ def _cleanup() -> None:
     parent = TMP_DIR.parent
     if parent.exists() and not any(parent.iterdir()):
         parent.rmdir()
-    for root in (CONFIG.package_dir, CONFIG.package_dir / "tests"):
+    for root in (CONFIG.package_dir, CONFIG.package_dir / "tests", CONFIG.package_dir / "runners"):
         cache = root / "__pycache__"
         if cache.exists():
             shutil.rmtree(cache, ignore_errors=True)
