@@ -24,11 +24,11 @@ SYMBOL = "BTCUSDT"
 DISPLAY_TZ = ZoneInfo("Europe/Istanbul")
 
 ANALYSIS_START = datetime(2026, 7, 1, tzinfo=timezone.utc)
-ANALYSIS_END_OPEN = datetime(2026, 9, 15, 23, 30, tzinfo=timezone.utc)
-ANALYSIS_END_CLOSE = datetime(2026, 9, 15, 23, 59, 59, 999000, tzinfo=timezone.utc)
-EXCLUSIVE_LOAD_END = datetime(2026, 9, 16, tzinfo=timezone.utc)
-EXPECTED_ROWS = 3696
-EXPECTED_MONTHLY = {(2026, 7): 1488, (2026, 8): 1488, (2026, 9): 720}
+ANALYSIS_END_OPEN = datetime(2026, 10, 27, 23, 30, tzinfo=timezone.utc)
+ANALYSIS_END_CLOSE = datetime(2026, 10, 27, 23, 59, 59, 999000, tzinfo=timezone.utc)
+EXCLUSIVE_LOAD_END = datetime(2026, 10, 28, tzinfo=timezone.utc)
+EXPECTED_ROWS = 5712
+EXPECTED_MONTHLY = {(2026, 7): 1488, (2026, 8): 1488, (2026, 9): 1440, (2026, 10): 1296}
 STEP_MS = 1_800_000
 
 STANDARD_ENABLED = True
@@ -85,7 +85,12 @@ USER_PARAMETERS = (
     ("Market", "Binance USD-M Perpetual"),
     ("Timeframe", "30m"),
     ("Analysis Start", "2026-07-01"),
-    ("Analysis End", "2026-09-15"),
+    ("Analysis End", "2026-10-27"),
+    ("Analysis End Inclusive", "2026-10-27T23:59:59.999Z"),
+    ("Analysis End Exclusive", "2026-10-28T00:00:00Z"),
+    ("Expected Analysis Rows", "5712"),
+    ("Actual Analysis Rows", "5712"),
+    ("Source Coverage", "BTCUSDT 30m 2026-07-01 through 2026-10-27; candles opening at or after 2026-10-28T00:00:00Z are excluded"),
     ("Standard Method", "Enabled"),
     ("Zero-Interior Method", "Disabled"),
     ("Alternative Method", "Disabled"),

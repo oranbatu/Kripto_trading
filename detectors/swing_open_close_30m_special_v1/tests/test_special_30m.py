@@ -1511,7 +1511,10 @@ class CursorLaunchTests(unittest.TestCase):
         self.assertEqual(cfg.SYMBOL, "BTCUSDT")
         self.assertEqual(cfg.TIMEFRAME, "30m")
         self.assertEqual(cfg.ANALYSIS_START, datetime(2026, 7, 1, tzinfo=UTC))
-        self.assertEqual(cfg.ANALYSIS_END_OPEN, datetime(2026, 9, 15, 23, 30, tzinfo=UTC))
+        self.assertEqual(cfg.ANALYSIS_END_OPEN, datetime(2026, 10, 27, 23, 30, tzinfo=UTC))
+        self.assertEqual(cfg.ANALYSIS_END_CLOSE, datetime(2026, 10, 27, 23, 59, 59, 999000, tzinfo=UTC))
+        self.assertEqual(cfg.EXCLUSIVE_LOAD_END, datetime(2026, 10, 28, tzinfo=UTC))
+        self.assertEqual(cfg.EXPECTED_ROWS, 5712)
         self.assertEqual(
             cfg.DATASET,
             Path(r"C:\MarketData\derived\binance\futures\um\perpetual\30m\symbol=BTCUSDT"),
@@ -1587,7 +1590,7 @@ class CursorLaunchTests(unittest.TestCase):
         launch = json.loads((PROJECT_ROOT / ".vscode" / "launch.json").read_text(encoding="utf-8"))
         settings = json.loads((PROJECT_ROOT / ".vscode" / "settings.json").read_text(encoding="utf-8"))
         names = [item["name"] for item in launch["configurations"]]
-        self.assertEqual(names[0], "Run BTCUSDT 4H Range Detector")
+        self.assertEqual(names[0], "Detector Control Center")
         self.assertIn("Run 30m Special Swing Detector", names)
         chosen = next(item for item in launch["configurations"] if item["name"] == "Run 30m Special Swing Detector")
         self.assertEqual(chosen["type"], "debugpy")
@@ -1602,19 +1605,114 @@ class CursorLaunchTests(unittest.TestCase):
         self.assertIn(".venv", settings["python.defaultInterpreterPath"])
         self.assertIn("python.exe", settings["python.defaultInterpreterPath"])
 
-    def test_production_fingerprint_is_unchanged(self) -> None:
-        from detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector import load_production
+    def test_production_window_and_old_boundary_regression(self) -> None:
+        from zoneinfo import ZoneInfo
 
-        bars = load_production()["bars"]
+        from detectors.swing_open_close_30m_special_v1.config import (
+            ANALYSIS_END_CLOSE,
+            ANALYSIS_END_OPEN,
+            ANALYSIS_START,
+            DISPLAY_TZ,
+            EXPECTED_MONTHLY,
+            EXPECTED_ROWS,
+            EXCLUSIVE_LOAD_END,
+            MIN_INTERIOR,
+            MAX_INTERIOR,
+        )
+        from detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector import (
+            load_production,
+            load_window,
+        )
+
+        old_end_open = datetime(2026, 9, 15, 23, 30, tzinfo=UTC)
+        old_end_close = datetime(2026, 9, 15, 23, 59, 59, 999000, tzinfo=UTC)
+        old_exclusive = datetime(2026, 9, 16, tzinfo=UTC)
+        old_loaded = load_window(
+            start=ANALYSIS_START,
+            exclusive_end=old_exclusive,
+            end_open=old_end_open,
+            end_close=old_end_close,
+            expected_rows=3696,
+            expected_monthly={(2026, 7): 1488, (2026, 8): 1488, (2026, 9): 720},
+        )
+        old_bars = old_loaded["bars"]
+        old_result = analyze(old_bars)
+        self.assertEqual(sum(item.direction == "SWING_HIGH" for item in old_result.displayed), 18)
+        self.assertEqual(sum(item.direction == "SWING_LOW" for item in old_result.displayed), 16)
+        self.assertEqual(len(old_result.displayed), 34)
+        self.assertEqual(signature(old_result), "8f52b5a5344a6b18f49e2386f3261dae4b9a9f2e0d646a89aeb1df6f75d8f3d6")
+
+        loaded = load_production()
+        bars = loaded["bars"]
+        self.assertEqual(len(bars), EXPECTED_ROWS)
+        self.assertEqual(len(bars), 5712)
+        self.assertEqual(bars[0].open_time, ANALYSIS_START)
+        self.assertEqual(bars[-1].open_time, ANALYSIS_END_OPEN)
+        self.assertEqual(bars[-1].close_time, ANALYSIS_END_CLOSE)
+        self.assertEqual(EXCLUSIVE_LOAD_END, datetime(2026, 10, 28, tzinfo=UTC))
+        monthly = {}
+        for bar in bars:
+            self.assertIsNotNone(bar.open_time.tzinfo)
+            self.assertEqual(bar.open_time.utcoffset(), UTC.utcoffset(None))
+            self.assertLess(bar.open_time, EXCLUSIVE_LOAD_END)
+            monthly[(bar.open_time.year, bar.open_time.month)] = monthly.get((bar.open_time.year, bar.open_time.month), 0) + 1
+        self.assertEqual(monthly, dict(EXPECTED_MONTHLY))
+        self.assertEqual(monthly[(2026, 7)], 1488)
+        self.assertEqual(monthly[(2026, 8)], 1488)
+        self.assertEqual(monthly[(2026, 9)], 1440)
+        self.assertEqual(monthly[(2026, 10)], 1296)
+        september_close = datetime(2026, 9, 30, 23, 30, tzinfo=UTC)
+        boundary = bars.index(next(bar for bar in bars if bar.open_time == september_close))
+        self.assertEqual(bars[boundary + 1].open_time, datetime(2026, 10, 1, tzinfo=UTC))
+        self.assertTrue(any(bar.open_time == datetime(2026, 10, 27, 23, 30, tzinfo=UTC) for bar in bars))
+        self.assertFalse(any(bar.open_time >= datetime(2026, 10, 28, tzinfo=UTC) for bar in bars))
+        self.assertEqual(str(DISPLAY_TZ), "Europe/Istanbul")
+        istanbul = ZoneInfo("Europe/Istanbul")
+        self.assertEqual(bars[0].open_time.astimezone(istanbul).isoformat(), "2026-07-01T03:00:00+03:00")
+        self.assertEqual(bars[-1].open_time.astimezone(istanbul).isoformat(), "2026-10-28T02:30:00+03:00")
+        self.assertEqual(bars[-1].close_time.astimezone(istanbul).isoformat(), "2026-10-28T02:59:59.999000+03:00")
+        sources = {path.name for path in loaded["source_paths"]}
+        self.assertIn("data.parquet", sources)
+        months = {path.parent.name for path in loaded["source_paths"]}
+        self.assertEqual(months, {"month=07", "month=08", "month=09", "month=10"})
         result = analyze(bars)
-        self.assertEqual(len(bars), 3696)
-        self.assertEqual(bars[0].open_time, datetime(2026, 7, 1, tzinfo=UTC))
-        self.assertEqual(bars[-1].open_time, datetime(2026, 9, 15, 23, 30, tzinfo=UTC))
-        self.assertEqual(sum(item.direction == "SWING_HIGH" for item in result.displayed), 18)
-        self.assertEqual(sum(item.direction == "SWING_LOW" for item in result.displayed), 16)
-        self.assertEqual(len(result.displayed), 34)
-        self.assertEqual(signature(result), "8f52b5a5344a6b18f49e2386f3261dae4b9a9f2e0d646a89aeb1df6f75d8f3d6")
-        self.assertEqual(signature(result), signature(analyze(bars)))
+        repeated = analyze(bars)
+        self.assertEqual(signature(result), signature(repeated))
+        historical = _confirmed_before(old_result, old_end_open)
+        extended_historical = _confirmed_before(result, old_end_open)
+        self.assertEqual(extended_historical, historical)
+        later = sum(1 for item in result.displayed if result.bars[item.close_row].open_time > old_end_open)
+        self.assertGreaterEqual(later, 0)
+        self.assertEqual(MIN_INTERIOR, 6)
+        self.assertEqual(MAX_INTERIOR, 9)
+        parameters = dict(USER_PARAMETERS)
+        self.assertEqual(parameters["Analysis End"], "2026-10-27")
+        self.assertEqual(parameters["Analysis End Exclusive"], "2026-10-28T00:00:00Z")
+        self.assertEqual(parameters["Expected Analysis Rows"], "5712")
+        self.assertEqual(parameters["Required Body Penetration Minimum"], "1/3")
+        self.assertEqual(parameters["Required Body Penetration Maximum"], "5/3")
+        self.assertEqual(parameters["Minimum Boundary Percent"], "1.00%")
+
+
+def _confirmed_before(result, end_open: datetime) -> tuple:
+    rows = []
+    for item in result.displayed:
+        close_open = result.bars[item.close_row].open_time
+        if close_open > end_open:
+            continue
+        rows.append((
+            item.direction,
+            result.bars[item.open_row].open_time,
+            close_open,
+            None if item.body_reference_row is None else result.bars[item.body_reference_row].open_time,
+            None if item.body_reference_price is None else format(item.body_reference_price, "f"),
+            None if item.peak_1_price is None else format(item.peak_1_price, "f"),
+            None if item.peak_2_price is None else format(item.peak_2_price, "f"),
+            None if item.dip_1_price is None else format(item.dip_1_price, "f"),
+            None if item.dip_2_price is None else format(item.dip_2_price, "f"),
+            format(item.extreme_price, "f"),
+        ))
+    return tuple(rows)
 
 
 if __name__ == "__main__":

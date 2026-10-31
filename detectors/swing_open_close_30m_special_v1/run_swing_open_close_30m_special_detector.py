@@ -112,11 +112,30 @@ def allocate_revision(directory: Path) -> tuple[int, Path]:
 
 
 def load_production() -> dict:
+    return load_window(
+        start=ANALYSIS_START,
+        exclusive_end=EXCLUSIVE_LOAD_END,
+        end_open=ANALYSIS_END_OPEN,
+        end_close=ANALYSIS_END_CLOSE,
+        expected_rows=EXPECTED_ROWS,
+        expected_monthly=EXPECTED_MONTHLY,
+    )
+
+
+def load_window(
+    *,
+    start: datetime,
+    exclusive_end: datetime,
+    end_open: datetime,
+    end_close: datetime,
+    expected_rows: int,
+    expected_monthly: dict[tuple[int, int], int],
+) -> dict:
     slice_ = load_candles(
         "BTCUSDT",
         TIMEFRAME,
-        ANALYSIS_START,
-        EXCLUSIVE_LOAD_END,
+        start,
+        exclusive_end,
         warmup_bars=0,
         precision_mode=config.PRECISION_EXACT,
     )
@@ -156,7 +175,15 @@ def load_production() -> dict:
             quote_volume=fields["quote_asset_volume"][index],
             trades=int(trade_count),
         ))
-    _validate_frame(bars)
+    _validate_frame(
+        bars,
+        start=start,
+        exclusive_end=exclusive_end,
+        end_open=end_open,
+        end_close=end_close,
+        expected_rows=expected_rows,
+        expected_monthly=expected_monthly,
+    )
     sources = [Path(path) for path in slice_.source_files]
     for path in sources:
         text = str(path).replace("/", "\\").lower()
@@ -169,13 +196,24 @@ def load_production() -> dict:
     return {"bars": bars, "source_paths": sources}
 
 
-def _validate_frame(bars: list[Bar]) -> None:
-    if len(bars) != EXPECTED_ROWS:
-        raise SpecialSwingError(f"rows {len(bars)} != {EXPECTED_ROWS}")
-    if bars[0].open_time != ANALYSIS_START or bars[-1].open_time != ANALYSIS_END_OPEN:
+def _validate_frame(
+    bars: list[Bar],
+    *,
+    start: datetime,
+    exclusive_end: datetime,
+    end_open: datetime,
+    end_close: datetime,
+    expected_rows: int,
+    expected_monthly: dict[tuple[int, int], int],
+) -> None:
+    if len(bars) != expected_rows:
+        raise SpecialSwingError(f"rows {len(bars)} != {expected_rows}")
+    if bars[0].open_time != start or bars[-1].open_time != end_open:
         raise SpecialSwingError("analysis endpoints do not match")
-    if bars[-1].close_time != ANALYSIS_END_CLOSE:
+    if bars[-1].close_time != end_close:
         raise SpecialSwingError("last close time mismatch")
+    if any(bar.open_time < start or bar.open_time >= exclusive_end for bar in bars):
+        raise SpecialSwingError("candle opens outside the half-open analysis window")
     monthly: dict[tuple[int, int], int] = {}
     previous = None
     seen = set()
@@ -194,7 +232,7 @@ def _validate_frame(bars: list[Bar]) -> None:
         if not (bar.low <= bar.open <= bar.high and bar.low <= bar.close <= bar.high and bar.low <= bar.high):
             raise SpecialSwingError(f"OHLC violation at {_iso(bar.open_time)}")
         previous = bar.open_time
-    if monthly != EXPECTED_MONTHLY:
+    if monthly != expected_monthly:
         raise SpecialSwingError(f"monthly counts {monthly}")
 
 
@@ -263,6 +301,12 @@ def main() -> int:
         "detector_version": DETECTOR_VERSION,
         "configuration_version": CONFIGURATION_VERSION,
         "dataset": str(DATASET),
+        "analysis_start": _iso(ANALYSIS_START),
+        "analysis_end_open": _iso(ANALYSIS_END_OPEN),
+        "analysis_end_close": _iso(ANALYSIS_END_CLOSE),
+        "analysis_end_exclusive": _iso(EXCLUSIVE_LOAD_END),
+        "expected_rows": EXPECTED_ROWS,
+        "actual_rows": len(loaded["bars"]),
         "rows": len(loaded["bars"]),
         "monthly": {f"{year}-{month:02d}": count for (year, month), count in EXPECTED_MONTHLY.items()},
         "source_files": source_before,

@@ -1,6 +1,6 @@
 # BTCUSDT 30M Swing Special
 
-This detector reads verified BTCUSDT USD-M perpetual 30-minute candles from 2026-07-01 through 2026-09-15.
+This detector reads verified BTCUSDT USD-M perpetual 30-minute candles from 2026-07-01T00:00:00Z through 2026-10-27T23:59:59.999Z. The load is half-open at 2026-10-28T00:00:00Z, so the last included open is 2026-10-27T23:30:00Z. The expected window is 5,712 rows: July 1,488, August 1,488, September 1,440, and 1–27 October 1,296.
 
 A structure needs 6 to 9 strictly interior candles, a total length of 8 to 11 candles. The first eligible Swing Close is `open_row + 7` and the last is `open_row + 10`. A Swing High must open on a bullish candle and close on a bearish candle. A Swing Low must open on a bearish candle and close on a bullish candle. A doji fails either role. The Swing Close is the first completed candle, at or after the six-interior minimum, that has the required direction and whose close penetrates the Swing Open real body by an inclusive ratio from 1/3 through 5/3. A close below 1/3 or above 5/3 does not bind, and the search continues inside the same horizon. The body is the interval between the Swing Open open and close. Only the Swing Close close sets the penetration position. Wicks are not used, and the Swing Close candle's own body size is not the test.
 
