@@ -12,13 +12,31 @@ When a pair exists, it is recalculated for every provisional Swing Close. A Swin
 
 After a Swing High is confirmed, Peak 1 is the maximum exact High from Swing Open through the Interior Body Reference candle, inclusive. Peak 2 is the maximum exact High from the bullish validation candle through Swing Close, inclusive. After a Swing Low is confirmed, Dip 1 is the minimum exact Low from Swing Open through the reference candle, and Dip 2 is the minimum exact Low from the bearish validation candle through Swing Close. The two segments are consecutive, do not overlap, and cover every candle from Swing Open through Swing Close once. Exact price ties keep the last candle. These fields are descriptive: they do not confirm the swing, choose the reference, calculate boundaries, or select Primary. A missing pair leaves Peak and Dip cells blank.
 
-Run from the project root:
+The analytical engine, configuration thresholds, and workbook writer are shared. Nine fixed-symbol wrappers call that same runner. A wrapper cannot be pointed at another symbol from the command line, and there is no all-symbol batch mode. Each symbol reads only `C:\MarketData\derived\binance\futures\um\perpetual\30m\symbol=<SYMBOL>`, validates the same 5,712-row window, and publishes only its own `SYMBOL_30M_Special_Swings_revNN.xlsx` family on the visible Desktop. Revision numbers are independent. Reports and logs are `reports\special_30m_swing_<SYMBOL>_report.json` and `logs\special_30m_swing_<SYMBOL>.log`. Older unsuffixed BTC report and log files are historical and are not overwritten.
+
+The shared algorithm identity is `UM_PERP_30M_SPECIAL_SWING_V1`. BTC workbooks also keep the legacy detector identity `BTCUSDT_30M_SPECIAL_SWING_V1`. The configuration identity is unchanged. Version labels are not part of the analytical fingerprint.
+
+Detector Control Center lists each symbol as its own Swing Detectors task. Selecting more than one runs the wrappers sequentially in registry order.
+
+Run one symbol from the project root with the project interpreter. PowerShell activation is not required:
 
 ```text
-.venv\Scripts\python.exe detectors\swing_open_close_30m_special_v1\run_swing_open_close_30m_special_detector.py
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_btcusdt_special_swing
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_ethusdt_special_swing
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_avaxusdt_special_swing
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_aaveusdt_special_swing
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_nearusdt_special_swing
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_linkusdt_special_swing
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_ltcusdt_special_swing
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_opusdt_special_swing
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.runners.run_dotusdt_special_swing
 ```
 
-No arguments are required. That command uses the production defaults: BTCUSDT, the 30-minute timeframe, the configured analysis period, and the existing Parquet source. The runner allocates the next workbook revision and does not overwrite an existing workbook. The integrated terminal prints the detector version, counts, workbook path, runtime, and status. The JSON report is `reports\special_30m_swing_report.json` and the log is `logs\special_30m_swing.log`.
+The original no-argument module still analyzes BTCUSDT only:
+
+```text
+.venv\Scripts\python.exe -m detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector
+```
 
 To run it in Cursor:
 

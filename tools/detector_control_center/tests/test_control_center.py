@@ -48,6 +48,26 @@ class RegistryTests(unittest.TestCase):
             self.assertIn('if __name__ == "__main__":', text)
             self.assertIn(f'SYMBOL = "{symbol}"', text)
 
+    def test_special_swing_30m_entries_are_fixed_symbol_modules(self) -> None:
+        symbols = ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "AAVEUSDT", "NEARUSDT", "LINKUSDT", "LTCUSDT", "OPUSDT", "DOTUSDT")
+        tasks = [task for task in TASKS if task.timeframes == ("30m",) and task.category == "Swing Detectors"]
+        self.assertEqual([task.symbol for task in tasks], list(symbols))
+        self.assertEqual(len({task.id for task in tasks}), 9)
+        self.assertNotIn("swing_30m_special", {task.id for task in TASKS})
+        for task in tasks:
+            self.assertEqual(task.args, ())
+            self.assertTrue(task.production and task.enabled)
+            self.assertEqual(
+                task.module,
+                f"detectors.swing_open_close_30m_special_v1.runners.run_{task.symbol.lower()}_special_swing",
+            )
+            self.assertNotIn("--all-symbols", task.args)
+            self.assertTrue(task.source_file().is_file())
+        state = SelectionState(tasks)
+        state.set_selected("swing_30m_dotusdt", True)
+        state.set_selected("swing_30m_btcusdt", True)
+        self.assertEqual(state.ordered_ids(), ("swing_30m_btcusdt", "swing_30m_dotusdt"))
+
     def test_bytecode_only_range_detector_is_disabled(self) -> None:
         task = task_by_id("range_detector_4h_v1")
         self.assertFalse(task.enabled)
@@ -74,7 +94,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(state.ordered_ids(), ("price_touch_btcusdt",))
         state.query = "avax"
         state.category = "All Detectors"
-        self.assertEqual([task.id for task in state.visible()], ["price_touch_avaxusdt"])
+        self.assertEqual([task.id for task in state.visible()], ["price_touch_avaxusdt", "swing_30m_avaxusdt"])
         state.select_visible()
         state.query = ""
         state.clear()
@@ -93,9 +113,9 @@ class SelectionTests(unittest.TestCase):
 
     def test_duplicate_ids_are_not_repeated(self) -> None:
         state = SelectionState()
-        state.set_selected("swing_30m_special", True)
-        state.set_selected("swing_30m_special", True)
-        self.assertEqual(state.ordered_ids(), ("swing_30m_special",))
+        state.set_selected("swing_30m_btcusdt", True)
+        state.set_selected("swing_30m_btcusdt", True)
+        self.assertEqual(state.ordered_ids(), ("swing_30m_btcusdt",))
 
 
 class ExecutionTests(unittest.TestCase):

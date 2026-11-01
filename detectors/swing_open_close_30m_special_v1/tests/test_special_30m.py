@@ -1,6 +1,9 @@
 """Tests for the separate 30-minute special swing detector."""
 from __future__ import annotations
 
+import ast
+import hashlib
+import importlib
 import json
 import runpy
 import subprocess
@@ -1713,6 +1716,214 @@ def _confirmed_before(result, end_open: datetime) -> tuple:
             format(item.extreme_price, "f"),
         ))
     return tuple(rows)
+
+
+class MultiSymbolRunnerTests(unittest.TestCase):
+    def test_registry_contains_exactly_nine_independent_profiles(self) -> None:
+        from detectors.swing_open_close_30m_special_v1.config import EXPECTED_MONTHLY, EXPECTED_ROWS
+        from detectors.swing_open_close_30m_special_v1.symbols import APPROVED_SYMBOLS, PROFILES, SymbolSelectionError, require_profile
+
+        self.assertEqual(APPROVED_SYMBOLS, tuple(profile.symbol for profile in PROFILES))
+        self.assertEqual(len(PROFILES), 9)
+        self.assertEqual(len({profile.symbol for profile in PROFILES}), 9)
+        self.assertEqual(len({profile.tradingview_symbol for profile in PROFILES}), 9)
+        self.assertEqual(len({profile.source_dir for profile in PROFILES}), 9)
+        self.assertEqual(len({profile.workbook_prefix for profile in PROFILES}), 9)
+        self.assertEqual(len({profile.report_filename for profile in PROFILES}), 9)
+        self.assertEqual(len({profile.log_filename for profile in PROFILES}), 9)
+        for profile in PROFILES:
+            text = str(profile.source_dir).replace("/", "\\").lower()
+            self.assertIn(r"\perpetual\30m\symbol=", text)
+            self.assertNotIn("spot", text)
+            self.assertEqual(profile.timeframe, "30m")
+            self.assertEqual(profile.tradingview_symbol, f"BINANCE:{profile.symbol}.P")
+            self.assertTrue(profile.report_filename.endswith(f"{profile.symbol}_report.json"))
+            self.assertTrue(profile.log_filename.endswith(f"{profile.symbol}.log"))
+        self.assertEqual(EXPECTED_ROWS, 5712)
+        self.assertEqual(EXPECTED_MONTHLY, {(2026, 7): 1488, (2026, 8): 1488, (2026, 9): 1440, (2026, 10): 1296})
+        with self.assertRaises(SymbolSelectionError):
+            require_profile("DOGEUSDT")
+        with self.assertRaises(SymbolSelectionError):
+            require_profile(r"..\BTCUSDT")
+        with self.assertRaises(SymbolSelectionError):
+            require_profile("BTCUSDT/../ETHUSDT")
+
+    def test_every_symbol_window_has_5712_rows_and_excludes_october_28(self) -> None:
+        from detectors.swing_open_close_30m_special_v1.config import (
+            ANALYSIS_END_CLOSE,
+            ANALYSIS_END_OPEN,
+            ANALYSIS_START,
+            EXCLUSIVE_LOAD_END,
+            EXPECTED_MONTHLY,
+        )
+        from detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector import load_window
+        from detectors.swing_open_close_30m_special_v1.symbols import PROFILES
+
+        for profile in PROFILES:
+            loaded = load_window(
+                start=ANALYSIS_START,
+                exclusive_end=EXCLUSIVE_LOAD_END,
+                end_open=ANALYSIS_END_OPEN,
+                end_close=ANALYSIS_END_CLOSE,
+                expected_rows=5712,
+                expected_monthly=EXPECTED_MONTHLY,
+                symbol=profile.symbol,
+            )
+            bars = loaded["bars"]
+            monthly = {}
+            for bar in bars:
+                key = (bar.open_time.year, bar.open_time.month)
+                monthly[key] = monthly.get(key, 0) + 1
+            self.assertEqual(len(bars), 5712)
+            self.assertEqual(monthly, EXPECTED_MONTHLY)
+            self.assertEqual(bars[0].open_time, ANALYSIS_START)
+            self.assertEqual(bars[-1].open_time, ANALYSIS_END_OPEN)
+            self.assertEqual(bars[-1].close_time, ANALYSIS_END_CLOSE)
+            self.assertTrue(all(bar.open_time < EXCLUSIVE_LOAD_END for bar in bars))
+            self.assertTrue(all(str(path).lower().endswith(".parquet") for path in loaded["source_paths"]))
+
+    def test_wrappers_are_fixed_and_have_no_import_side_effect(self) -> None:
+        import detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector as runner
+        from detectors.swing_open_close_30m_special_v1.config import PACKAGE_DIR
+        from detectors.swing_open_close_30m_special_v1.symbols import APPROVED_SYMBOLS
+
+        for symbol in APPROVED_SYMBOLS:
+            path = PACKAGE_DIR / "runners" / f"run_{symbol.lower()}_special_swing.py"
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            assignments = [
+                node
+                for node in tree.body
+                if isinstance(node, ast.Assign)
+                for target in node.targets
+                if isinstance(target, ast.Name) and target.id == "SYMBOL"
+            ]
+            self.assertEqual(len(assignments), 1)
+            self.assertEqual(assignments[0].value.value, symbol)
+            calls = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "run_for_symbol_cli"
+            ]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0].args[0].id, "SYMBOL")
+            self.assertNotIn("sys.argv", source)
+            self.assertNotIn("all-symbols", source)
+            self.assertNotIn("def analyze", source)
+            self.assertNotIn("MIN_INTERIOR", source)
+            module = importlib.import_module(
+                f"detectors.swing_open_close_30m_special_v1.runners.run_{symbol.lower()}_special_swing"
+            )
+            with mock.patch.object(module, "run_for_symbol_cli", return_value=4) as cli:
+                previous = list(sys.argv)
+                sys.argv = ["wrapper", "BTCUSDT"]
+                try:
+                    self.assertEqual(module.main(), 4)
+                finally:
+                    sys.argv = previous
+            cli.assert_called_once_with(symbol)
+        with mock.patch.object(runner, "load_window", side_effect=AssertionError("loaded")):
+            reloaded = importlib.reload(
+                importlib.import_module("detectors.swing_open_close_30m_special_v1.runners.run_ethusdt_special_swing")
+            )
+            self.assertEqual(reloaded.SYMBOL, "ETHUSDT")
+
+    def test_unknown_symbol_does_not_load_or_publish(self) -> None:
+        import detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector as runner
+
+        with mock.patch.object(runner, "load_production", side_effect=AssertionError("loaded")), mock.patch.object(
+            runner, "load_window", side_effect=AssertionError("loaded")
+        ), mock.patch.object(runner, "_publish", side_effect=AssertionError("published")):
+            self.assertEqual(runner.run_for_symbol_cli("DOGEUSDT"), 1)
+
+    def test_revision_sequences_are_independent_and_ignore_unrelated_files(self) -> None:
+        from detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector import allocate_revision
+
+        with tempfile.TemporaryDirectory() as folder:
+            desktop = Path(folder)
+            (desktop / "BTCUSDT_30M_Special_Swings_rev04.xlsx").write_bytes(b"btc")
+            (desktop / "~$BTCUSDT_30M_Special_Swings_rev09.xlsx").write_bytes(b"lock")
+            (desktop / "BTCUSDT_30M_Special_Swings_rev04.tmp.xlsx").write_bytes(b"temp")
+            (desktop / "BTCUSDT_30M_Special_Swings_rev04.bak.xlsx").write_bytes(b"bak")
+            (desktop / "AVAXUSDT_30M_Special_Swings_rev07.xlsx").write_bytes(b"avax")
+            (desktop / "ETHUSDT_MTF_Most_Touched_Levels_rev03.xlsx").write_bytes(b"touch")
+            eth_revision, eth_path = allocate_revision(desktop, "ETHUSDT")
+            btc_revision, btc_path = allocate_revision(desktop, "BTCUSDT")
+            self.assertEqual(eth_revision, 0)
+            self.assertEqual(eth_path.name, "ETHUSDT_30M_Special_Swings_rev00.xlsx")
+            self.assertEqual(btc_revision, 5)
+            self.assertEqual(btc_path.name, "BTCUSDT_30M_Special_Swings_rev05.xlsx")
+
+    def test_publication_does_not_overwrite_and_reallocates_a_collision(self) -> None:
+        import detectors.swing_open_close_30m_special_v1.run_swing_open_close_30m_special_detector as runner
+        from detectors.swing_open_close_30m_special_v1.desktop_output import DesktopLocation
+        from detectors.swing_open_close_30m_special_v1.symbols import require_profile
+
+        profile = require_profile("AAVEUSDT")
+        with tempfile.TemporaryDirectory() as folder:
+            desktop = Path(folder)
+            temporary = desktop / "tmp"
+            temporary.mkdir()
+
+            def write(path, result, parameters=None):
+                path.write_bytes(b"book")
+
+            with mock.patch.object(runner, "visible_desktop", return_value=DesktopLocation(desktop, "test")), mock.patch.object(
+                runner, "TMP_DIR", temporary
+            ), mock.patch.object(runner, "write_workbook", side_effect=write), mock.patch.object(
+                runner, "validate_workbook", return_value={}
+            ), mock.patch.object(runner, "protected_fingerprint", return_value={}), mock.patch.object(
+                runner, "fingerprint_file", return_value={"sha256": "a"}
+            ):
+                first = runner._publish(None, {}, {}, profile)
+                second = runner._publish(None, {}, {}, profile)
+
+                def collide(path, result, parameters=None):
+                    occupied = desktop / "AAVEUSDT_30M_Special_Swings_rev02.xlsx"
+                    if not occupied.exists():
+                        occupied.write_bytes(b"kept")
+                    path.write_bytes(b"next")
+
+                runner.write_workbook.side_effect = collide
+                third = runner._publish(None, {}, {}, profile)
+            self.assertEqual(first.name, "AAVEUSDT_30M_Special_Swings_rev00.xlsx")
+            self.assertEqual(second.name, "AAVEUSDT_30M_Special_Swings_rev01.xlsx")
+            self.assertEqual(first.read_bytes(), b"book")
+            self.assertEqual((desktop / "AAVEUSDT_30M_Special_Swings_rev02.xlsx").read_bytes(), b"kept")
+            self.assertEqual(third.name, "AAVEUSDT_30M_Special_Swings_rev03.xlsx")
+
+    def test_symbol_workbook_keeps_16_columns_and_one_symbol(self) -> None:
+        from openpyxl import load_workbook
+
+        from detectors.swing_open_close_30m_special_v1.config import RESULT_COLUMNS, SHEETS
+        from detectors.swing_open_close_30m_special_v1.engine import Analysis
+        from detectors.swing_open_close_30m_special_v1.symbols import parameters_for, require_profile
+        from detectors.swing_open_close_30m_special_v1.workbook import validate_workbook, write_workbook
+
+        profile = require_profile("LINKUSDT")
+        parameters = parameters_for(profile, 0)
+        result = Analysis(bars=[], searches=[], raw=[], displayed=[], counters={})
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "LINKUSDT_30M_Special_Swings_rev00.xlsx"
+            write_workbook(path, result, parameters)
+            validate_workbook(path, result, parameters)
+            book = load_workbook(path, read_only=False, data_only=False)
+            self.assertEqual(book.sheetnames, list(SHEETS))
+            header = tuple(cell.value for cell in book["Special Swings"][1])
+            self.assertEqual(header, RESULT_COLUMNS)
+            self.assertEqual(book["Special Swings"].max_column, 16)
+            values = {row[0]: row[1] for row in book["Parameters"].iter_rows(min_row=2, max_col=2, values_only=True)}
+            self.assertEqual(values["Symbol"], "LINKUSDT")
+            self.assertEqual(values["TradingView Symbol"], "BINANCE:LINKUSDT.P")
+            self.assertEqual(values["Algorithm Identity"], "UM_PERP_30M_SPECIAL_SWING_V1")
+            self.assertEqual(book["Special Swings"].max_row, 1)
+            book.close()
+
+    def test_existing_btc_workbook_is_not_changed_by_these_tests(self) -> None:
+        path = Path(r"C:\Users\oranb\Desktop\BTCUSDT_30M_Special_Swings_rev00.xlsx")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(digest, "2c133901ce167e94d41803328b54406887c7603f20002c3cc902dd2fa965a003")
+        self.assertEqual(list(Path(r"C:\Users\oranb\Desktop").glob("ETHUSDT_30M_Special_Swings_rev*.xlsx")), [])
 
 
 if __name__ == "__main__":

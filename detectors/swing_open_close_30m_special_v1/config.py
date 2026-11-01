@@ -11,12 +11,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = Path(__file__).resolve().parent
 DESKTOP_DIR = Path(r"C:\Users\oranb\Desktop")
 TMP_DIR = PROJECT_ROOT / "tmp" / "swing_open_close_30m_special_v1"
-REPORT_PATH = PROJECT_ROOT / "reports" / "special_30m_swing_report.json"
-LOG_PATH = PROJECT_ROOT / "logs" / "special_30m_swing.log"
+REPORT_PATH = PROJECT_ROOT / "reports" / "special_30m_swing_BTCUSDT_report.json"
+LOG_PATH = PROJECT_ROOT / "logs" / "special_30m_swing_BTCUSDT.log"
 DATASET = Path(r"C:\MarketData\derived\binance\futures\um\perpetual\30m\symbol=BTCUSDT")
 
 DETECTOR_NAME = "BTCUSDT 30M Swing Special"
 DETECTOR_VERSION = "BTCUSDT_30M_SPECIAL_SWING_V1"
+ALGORITHM_VERSION = "UM_PERP_30M_SPECIAL_SWING_V1"
 CONFIGURATION_VERSION = "STANDARD_6_TO_9_PEAK_DIP_WICK_BOUNDARY_1_00_PENETRATION_1_3_TO_5_3_REFERENCE_LOW_HIGH_COMPATIBILITY_MINIMAL_16_COLUMN_EXCEL_V16"
 FORMATION_CLASS = "STANDARD_30M_SPECIAL"
 TIMEFRAME = "30m"

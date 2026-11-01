@@ -126,7 +126,7 @@ def _paint(sheet, rows: list[list]) -> None:
     sheet.add_table(table)
 
 
-def write_workbook(path: Path, result: Analysis) -> None:
+def write_workbook(path: Path, result: Analysis, parameters: tuple | None = None) -> None:
     if len(RESULT_COLUMNS) != 16:
         raise RuntimeError("result contract is not 16 columns")
     book = Workbook()
@@ -146,21 +146,22 @@ def write_workbook(path: Path, result: Analysis) -> None:
                 raise RuntimeError("result row is not 16 columns")
             sheet.append(row)
         _paint(sheet, selected)
-    parameters = book.create_sheet("Parameters")
-    parameters.append(["Parameter", "Value"])
-    for name, value in USER_PARAMETERS:
-        parameters.append([name, value])
-    for cell in parameters[1]:
+    chosen = USER_PARAMETERS if parameters is None else parameters
+    parameter_sheet = book.create_sheet("Parameters")
+    parameter_sheet.append(["Parameter", "Value"])
+    for name, value in chosen:
+        parameter_sheet.append([name, value])
+    for cell in parameter_sheet[1]:
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.alignment = WRAP
-    parameters.freeze_panes = "A2"
-    parameters.auto_filter.ref = f"A1:B{parameters.max_row}"
-    parameters.column_dimensions["A"].width = 52
-    parameters.column_dimensions["B"].width = 64
-    parameter_table = Table(displayName="DetectorParameters", ref=f"A1:B{parameters.max_row}")
+    parameter_sheet.freeze_panes = "A2"
+    parameter_sheet.auto_filter.ref = f"A1:B{parameter_sheet.max_row}"
+    parameter_sheet.column_dimensions["A"].width = 52
+    parameter_sheet.column_dimensions["B"].width = 64
+    parameter_table = Table(displayName="DetectorParameters", ref=f"A1:B{parameter_sheet.max_row}")
     parameter_table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=False)
-    parameters.add_table(parameter_table)
+    parameter_sheet.add_table(parameter_table)
     if book.sheetnames != list(SHEETS):
         raise RuntimeError(f"sheet order {book.sheetnames}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -266,7 +267,7 @@ def _contract(sheet) -> None:
             raise RuntimeError(f"{sheet.title} has a hidden row")
 
 
-def validate_workbook(path: Path, result: Analysis) -> dict:
+def validate_workbook(path: Path, result: Analysis, parameters: tuple | None = None) -> dict:
     normal = load_workbook(path, read_only=False, data_only=False)
     readonly = load_workbook(path, read_only=True, data_only=False)
     data_only = load_workbook(path, read_only=True, data_only=True)
@@ -293,7 +294,7 @@ def validate_workbook(path: Path, result: Analysis) -> dict:
         if not parameter_table.ref.startswith("A1:B"):
             raise RuntimeError("parameters table is not limited to columns A:B")
         values = {row[0]: row[1] for row in normal["Parameters"].iter_rows(min_row=2, max_col=2, values_only=True)}
-        if values != dict(USER_PARAMETERS):
+        if values != dict(USER_PARAMETERS if parameters is None else parameters):
             raise RuntimeError("parameters sheet does not match the configured list")
         blob = " ".join(str(item) for item in values.values())
         if "0.80%" in blob or values["Maximum Interior Candles"] in {"10", "20"} or values["Minimum Interior Candles"] == "7":

@@ -41,6 +41,8 @@ A real RUN is a production run. Each selected detector may publish its next Exce
 
 The generic price-touch command is not a checkbox. The nine symbol wrappers are separate entries, and none of them passes `--all-symbols`.
 
+The 30-minute special swing detector is also nine separate Swing Detectors entries. Each one runs only its fixed symbol through the shared detector. Selecting several of them runs those wrappers one after another in registry order. There is no all-symbol swing command.
+
 Strategies are not listed.
 
 ## Add a future detector

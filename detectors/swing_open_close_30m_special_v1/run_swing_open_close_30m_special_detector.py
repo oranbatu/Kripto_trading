@@ -22,12 +22,11 @@ import config
 from data.loader import load_candles
 from data.timeutil import datetime_to_ms
 from detectors.swing_open_close_30m_special_v1.config import (
+    ALGORITHM_VERSION,
     ANALYSIS_END_CLOSE,
     ANALYSIS_END_OPEN,
     ANALYSIS_START,
     CONFIGURATION_VERSION,
-    DATASET,
-    DESKTOP_DIR,
     DETECTOR_NAME,
     DETECTOR_VERSION,
     EXCLUSIVE_LOAD_END,
@@ -36,18 +35,15 @@ from detectors.swing_open_close_30m_special_v1.config import (
     LOG_PATH,
     PACKAGE_DIR,
     PROJECT_ROOT,
-    REPORT_PATH,
-    REVISION_PATTERN,
     STEP_MS,
     SYMBOL,
     TIMEFRAME,
     TMP_DIR,
 )
+from detectors.swing_open_close_30m_special_v1.desktop_output import visible_desktop
 from detectors.swing_open_close_30m_special_v1.engine import Analysis, Bar, SpecialSwingError, analyze, signature
+from detectors.swing_open_close_30m_special_v1.symbols import SymbolProfile, parameters_for, require_profile
 from detectors.swing_open_close_30m_special_v1.workbook import validate_workbook, write_workbook
-
-# iso_utc is not in engine - I referenced it by mistake. I'll define locally if missing.
-# Wait I didn't export iso_utc from engine. I need to fix the import.
 
 
 def _decimal(value) -> Decimal:
@@ -99,8 +95,9 @@ def protected_fingerprint() -> dict[str, dict]:
     return found
 
 
-def allocate_revision(directory: Path) -> tuple[int, Path]:
-    pattern = re.compile(REVISION_PATTERN, re.IGNORECASE)
+def allocate_revision(directory: Path, symbol: str = SYMBOL) -> tuple[int, Path]:
+    profile = require_profile(symbol)
+    pattern = re.compile(rf"^{re.escape(profile.workbook_prefix)}_rev(\d{{2,}})\.xlsx$", re.IGNORECASE)
     highest = -1
     if directory.exists():
         for path in directory.glob("*.xlsx"):
@@ -108,7 +105,7 @@ def allocate_revision(directory: Path) -> tuple[int, Path]:
             if match:
                 highest = max(highest, int(match.group(1)))
     revision = highest + 1
-    return revision, directory / f"BTCUSDT_30M_Special_Swings_rev{revision:02d}.xlsx"
+    return revision, directory / f"{profile.workbook_prefix}_rev{revision:02d}.xlsx"
 
 
 def load_production() -> dict:
@@ -130,16 +127,18 @@ def load_window(
     end_close: datetime,
     expected_rows: int,
     expected_monthly: dict[tuple[int, int], int],
+    symbol: str = SYMBOL,
 ) -> dict:
+    profile = require_profile(symbol)
     slice_ = load_candles(
-        "BTCUSDT",
+        profile.symbol,
         TIMEFRAME,
         start,
         exclusive_end,
         warmup_bars=0,
         precision_mode=config.PRECISION_EXACT,
     )
-    if slice_.symbol != "BTCUSDT" or slice_.timeframe != TIMEFRAME or slice_.precision_mode != config.PRECISION_EXACT:
+    if slice_.symbol != profile.symbol or slice_.timeframe != TIMEFRAME or slice_.precision_mode != config.PRECISION_EXACT:
         raise SpecialSwingError("dataset identity mismatch")
     if slice_.warmup_bars_loaded != 0:
         raise SpecialSwingError("warmup candles are not allowed")
@@ -154,7 +153,7 @@ def load_window(
     trades = table.column("number_of_trades").to_pylist()
     bars: list[Bar] = []
     for index in range(table.num_rows):
-        if symbols[index] != "BTCUSDT":
+        if symbols[index] != profile.symbol:
             raise SpecialSwingError(f"unexpected symbol at row {index}")
         trade_count = trades[index]
         if trade_count is None or int(trade_count) < 0:
@@ -187,13 +186,14 @@ def load_window(
     sources = [Path(path) for path in slice_.source_files]
     for path in sources:
         text = str(path).replace("/", "\\").lower()
-        if "perpetual\\30m\\symbol=btcusdt" not in text:
+        expected = str(profile.source_dir).replace("/", "\\").lower()
+        if expected not in text or f"symbol={profile.symbol.lower()}" not in text:
             raise SpecialSwingError(f"unexpected source path {path}")
         if not path.is_file():
             raise SpecialSwingError(f"source parquet is missing: {path}")
         with path.open("rb"):
             pass
-    return {"bars": bars, "source_paths": sources}
+    return {"bars": bars, "source_paths": sources, "profile": profile}
 
 
 def _validate_frame(
@@ -236,19 +236,23 @@ def _validate_frame(
         raise SpecialSwingError(f"monthly counts {monthly}")
 
 
-def _publish(result: Analysis, protected_before: dict, source_before: dict) -> Path:
+def _publish(result: Analysis, protected_before: dict, source_before: dict, profile: SymbolProfile) -> Path:
     TMP_DIR.mkdir(parents=True, exist_ok=True)
-    revision, final_path = allocate_revision(DESKTOP_DIR)
-    if final_path.exists():
-        raise SpecialSwingError(f"refusing to overwrite {final_path}")
-    temporary = TMP_DIR / f"{final_path.stem}.tmp.xlsx"
-    write_workbook(temporary, result)
-    validate_workbook(temporary, result)
-    revision, final_path = allocate_revision(DESKTOP_DIR)
-    if final_path.exists():
-        temporary.unlink(missing_ok=True)
-        raise SpecialSwingError(f"refusing to overwrite {final_path}")
-    os.replace(temporary, final_path)
+    desktop = visible_desktop().path
+    while True:
+        revision, final_path = allocate_revision(desktop, profile.symbol)
+        if final_path.exists():
+            continue
+        temporary = TMP_DIR / f"{final_path.stem}.tmp.xlsx"
+        parameters = parameters_for(profile, revision)
+        write_workbook(temporary, result, parameters)
+        validate_workbook(temporary, result, parameters)
+        confirmed_revision, confirmed_path = allocate_revision(desktop, profile.symbol)
+        if confirmed_path != final_path or confirmed_path.exists() or confirmed_revision != revision:
+            temporary.unlink(missing_ok=True)
+            continue
+        os.replace(temporary, final_path)
+        break
     if protected_fingerprint() != protected_before:
         final_path.unlink(missing_ok=True)
         raise SpecialSwingError("protected detector files changed")
@@ -275,32 +279,85 @@ def _cleanup_temporary_workbooks() -> None:
         path.unlink(missing_ok=True)
 
 
-def _print_failure(exc: BaseException) -> None:
+def _print_failure(exc: BaseException, profile: SymbolProfile | None = None) -> None:
     print("STATUS FAILURE")
     print(f"DETECTOR {DETECTOR_NAME}")
     print(f"DETECTOR_VERSION {DETECTOR_VERSION}")
+    print(f"ALGORITHM_VERSION {ALGORITHM_VERSION}")
     print(f"CONFIGURATION_VERSION {CONFIGURATION_VERSION}")
+    if profile is not None:
+        print(f"SYMBOL {profile.symbol}")
+        print(f"LOG {profile.log_path}")
+    else:
+        print(f"LOG {LOG_PATH}")
     print(f"ERROR {type(exc).__name__}: {exc}")
-    print(f"LOG {LOG_PATH}")
 
 
-def main() -> int:
+def analyze_symbol(symbol: str) -> dict:
+    """Load and analyze one approved symbol without publishing a workbook."""
+    profile = require_profile(symbol)
+    loaded = load_production() if profile.symbol == SYMBOL else load_window(
+        start=ANALYSIS_START,
+        exclusive_end=EXCLUSIVE_LOAD_END,
+        end_open=ANALYSIS_END_OPEN,
+        end_close=ANALYSIS_END_CLOSE,
+        expected_rows=EXPECTED_ROWS,
+        expected_monthly=EXPECTED_MONTHLY,
+        symbol=profile.symbol,
+    )
+    result = analyze(loaded["bars"])
+    again = analyze(loaded["bars"])
+    fingerprint = signature(result)
+    if fingerprint != signature(again):
+        raise SpecialSwingError("detection is not deterministic")
+    return {
+        "symbol": profile.symbol,
+        "tradingview_symbol": profile.tradingview_symbol,
+        "source": str(profile.source_dir),
+        "partitions": [str(path) for path in loaded["source_paths"]],
+        "rows": len(loaded["bars"]),
+        "first_open": _iso(loaded["bars"][0].open_time),
+        "last_open": _iso(loaded["bars"][-1].open_time),
+        "last_close": _iso(loaded["bars"][-1].close_time),
+        "validation": "passed",
+        "swing_high": result.counters["swing_high"],
+        "swing_low": result.counters["swing_low"],
+        "retained": result.counters["displayed"],
+        "fingerprint": fingerprint,
+        "warnings": list(result.warnings),
+    }
+
+
+def _execute(profile: SymbolProfile) -> int:
     started = time.perf_counter()
     protected_before = protected_fingerprint()
-    loaded = load_production()
+    loaded = load_production() if profile.symbol == SYMBOL else load_window(
+        start=ANALYSIS_START,
+        exclusive_end=EXCLUSIVE_LOAD_END,
+        end_open=ANALYSIS_END_OPEN,
+        end_close=ANALYSIS_END_CLOSE,
+        expected_rows=EXPECTED_ROWS,
+        expected_monthly=EXPECTED_MONTHLY,
+        symbol=profile.symbol,
+    )
     source_before = {str(path.resolve()): fingerprint_file(path) for path in loaded["source_paths"]}
     result = analyze(loaded["bars"])
     again = analyze(loaded["bars"])
     if signature(result) != signature(again):
         raise SpecialSwingError("detection is not deterministic")
-    final_path = _publish(result, protected_before, source_before)
-    validation = validate_workbook(final_path, result)
+    final_path = _publish(result, protected_before, source_before, profile)
+    parameters = parameters_for(profile, int(final_path.stem.rsplit("rev", 1)[-1]))
+    validation = validate_workbook(final_path, result, parameters)
     counters = result.counters
     payload = {
         "detector_name": DETECTOR_NAME,
-        "detector_version": DETECTOR_VERSION,
+        "detector_version": DETECTOR_VERSION if profile.symbol == SYMBOL else ALGORITHM_VERSION,
+        "algorithm_version": ALGORITHM_VERSION,
+        "legacy_btc_detector_version": DETECTOR_VERSION,
         "configuration_version": CONFIGURATION_VERSION,
-        "dataset": str(DATASET),
+        "symbol": profile.symbol,
+        "tradingview_symbol": profile.tradingview_symbol,
+        "dataset": str(profile.source_dir),
         "analysis_start": _iso(ANALYSIS_START),
         "analysis_end_open": _iso(ANALYSIS_END_OPEN),
         "analysis_end_close": _iso(ANALYSIS_END_CLOSE),
@@ -311,6 +368,8 @@ def main() -> int:
         "monthly": {f"{year}-{month:02d}": count for (year, month), count in EXPECTED_MONTHLY.items()},
         "source_files": source_before,
         "counters": _jsonable(counters),
+        "fingerprint": signature(result),
+        "warnings": list(result.warnings),
         "determinism": True,
         "workbook": str(final_path),
         "workbook_validation": validation,
@@ -318,18 +377,20 @@ def main() -> int:
         "source_changed": 0,
         "python": sys.version,
     }
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    logging.basicConfig(filename=LOG_PATH, level=logging.INFO, format="%(message)s", force=True)
-    logging.info("%s %s", DETECTOR_NAME, CONFIGURATION_VERSION)
+    profile.report_path.parent.mkdir(parents=True, exist_ok=True)
+    profile.log_path.parent.mkdir(parents=True, exist_ok=True)
+    profile.report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    logging.basicConfig(filename=profile.log_path, level=logging.INFO, format="%(message)s", force=True)
+    logging.info("%s %s %s", DETECTOR_NAME, profile.symbol, CONFIGURATION_VERSION)
     logging.info("rows %s workbook %s", len(loaded["bars"]), final_path)
     logging.info("primary %s raw %s", counters["displayed"], counters["raw"])
     elapsed = time.perf_counter() - started
     print(f"DETECTOR {DETECTOR_NAME}")
-    print(f"DETECTOR_VERSION {DETECTOR_VERSION}")
+    print(f"DETECTOR_VERSION {DETECTOR_VERSION if profile.symbol == SYMBOL else ALGORITHM_VERSION}")
+    print(f"ALGORITHM_VERSION {ALGORITHM_VERSION}")
     print(f"CONFIGURATION_VERSION {CONFIGURATION_VERSION}")
-    print(f"SYMBOL {SYMBOL}")
+    print(f"SYMBOL {profile.symbol}")
+    print(f"TRADINGVIEW {profile.tradingview_symbol}")
     print(f"TIMEFRAME {TIMEFRAME}")
     print(f"ANALYSIS {ANALYSIS_START.date().isoformat()} {ANALYSIS_END_OPEN.date().isoformat()}")
     print(f"ROWS {len(loaded['bars'])}")
@@ -340,20 +401,31 @@ def main() -> int:
     print(f"REVISION {final_path.stem.rsplit('rev', 1)[-1]}")
     print(f"RUNTIME_SECONDS {elapsed:.3f}")
     print("STATUS SUCCESS")
-    print(f"REPORT {REPORT_PATH}")
-    print(f"LOG {LOG_PATH}")
+    print(f"REPORT {profile.report_path}")
+    print(f"LOG {profile.log_path}")
     _cleanup_temporary_workbooks()
     return 0
 
 
-def _run() -> int:
+def run_for_symbol_cli(symbol: str) -> int:
+    """Run one approved symbol. The symbol argument is not read from the process command line."""
+    profile = None
     try:
-        return main()
+        profile = require_profile(symbol)
+        return _execute(profile)
     except Exception as exc:
-        _print_failure(exc)
+        _print_failure(exc, profile)
         traceback.print_exc()
         _cleanup_temporary_workbooks()
         return 1
+
+
+def main() -> int:
+    return run_for_symbol_cli(SYMBOL)
+
+
+def _run() -> int:
+    return main()
 
 
 if __name__ == "__main__":
