@@ -35,6 +35,14 @@ SYMBOLS = (
     "OPUSDT",
     "DOTUSDT",
 )
+# Wrapper and Control Center scope. --all-symbols stays on SYMBOLS above.
+PRICE_TOUCH_EXTENSION_SYMBOLS = (
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "SOLUSDT",
+)
+SUPPORTED_SYMBOLS = SYMBOLS + PRICE_TOUCH_EXTENSION_SYMBOLS
 DEFAULT_SYMBOL = "BTCUSDT"
 
 TIMEFRAMES = ("1h", "4h", "1d")
@@ -62,12 +70,73 @@ EXPECTED_LAST = {
 }
 DURATION_MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
+
+@dataclass(frozen=True, slots=True)
+class SymbolProfile:
+    symbol: str
+    tradingview_symbol: str
+    source_1h: str
+    source_4h: str
+    source_1d: str
+    workbook_family: str
+    report_name: str
+    log_name: str
+    algorithm_version: str
+    runner_version: str
+    expected_partitions: tuple[tuple[str, int], ...]
+    expected_rows: tuple[tuple[str, int], ...]
+    first_open_utc: str
+    last_close_utc: str
+    exclusive_end_utc: str
+
+
+def symbol_profile(symbol: str) -> SymbolProfile:
+    checked = require_price_touch_symbol(symbol)
+    sources = source_dataset(checked)
+    return SymbolProfile(
+        symbol=checked,
+        tradingview_symbol=tradingview_symbol(checked),
+        source_1h=str(sources["1h"]),
+        source_4h=str(sources["4h"]),
+        source_1d=str(sources["1d"]),
+        workbook_family=f"{checked}_MTF_Most_Touched_Levels_revNN.xlsx",
+        report_name=f"price_touch_hierarchy_{checked}.json",
+        log_name=f"price_touch_hierarchy_{checked}.log",
+        algorithm_version=ALGORITHM_VERSION,
+        runner_version=RUNNER_VERSION,
+        expected_partitions=tuple(EXPECTED_PARTITIONS.items()),
+        expected_rows=tuple(EXPECTED_ROWS.items()),
+        first_open_utc="2024-01-01T00:00:00Z",
+        last_close_utc="2026-10-27T23:59:59.999Z",
+        exclusive_end_utc="2026-10-28T00:00:00Z",
+    )
+
+
+def require_price_touch_symbol(symbol: str) -> str:
+    """Accept only an explicit Price Touch symbol. Reject path-like text."""
+    if (
+        type(symbol) is not str
+        or symbol not in SUPPORTED_SYMBOLS
+        or any(part in symbol for part in ("/", "\\", "..", ":", " "))
+    ):
+        raise ValueError(f"unsupported price-touch symbol {symbol!r}")
+    return symbol
+
+
 def source_dataset(symbol: str) -> dict[str, Path]:
-    return {timeframe: SOURCE_ROOT / timeframe / f"symbol={symbol}" for timeframe in TIMEFRAMES}
+    checked = require_price_touch_symbol(symbol)
+    root = SOURCE_ROOT.resolve()
+    datasets: dict[str, Path] = {}
+    for timeframe in TIMEFRAMES:
+        path = (root / timeframe / f"symbol={checked}").resolve()
+        if path.parent.parent != root or path.name != f"symbol={checked}":
+            raise ValueError(f"price-touch source escaped its dataset root: {path}")
+        datasets[timeframe] = path
+    return datasets
 
 
 def tradingview_symbol(symbol: str) -> str:
-    return f"BINANCE:{symbol}.P"
+    return f"BINANCE:{require_price_touch_symbol(symbol)}.P"
 
 
 def revision_pattern_text(symbol: str) -> str:

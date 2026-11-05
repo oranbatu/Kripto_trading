@@ -69,8 +69,12 @@ from detectors.price_touch_hierarchy_v1.touch_config import (
     PROJECT_ROOT,
     RUNNER_VERSION,
     SYMBOLS,
+    SUPPORTED_SYMBOLS,
+    PRICE_TOUCH_EXTENSION_SYMBOLS,
     TIMEFRAMES,
+    require_price_touch_symbol,
     source_dataset,
+    symbol_profile,
 )
 from detectors.price_touch_hierarchy_v1.workbook import validate_saved_workbook, write_workbook
 from detectors.price_touch_hierarchy_v1.workbook import _monthly_rows, _touch_rows
@@ -705,7 +709,9 @@ class MultiSymbolTests(unittest.TestCase):
             self.assertEqual(selected_symbols(["--symbol", symbol]), [symbol])
 
     def test_75_symbol_flags_reject_conflicts_and_unknown_symbols(self) -> None:
-        self.assertEqual(main(["--symbol", "DOGEUSDT"]), 2)
+        self.assertEqual(main(["--symbol", "FOOUSDT"]), 2)
+        self.assertEqual(main(["--symbol", "..\\BTCUSDT"]), 2)
+        self.assertEqual(main(["--symbol", "XRP/USDT"]), 2)
         self.assertEqual(main(["--symbol", "ETHUSDT", "--all-symbols"]), 2)
         self.assertEqual(batch_exit_code(["ok", "ok", "ok"]), 0)
         self.assertEqual(batch_exit_code(["ok", "failed"]), 1)
@@ -831,6 +837,10 @@ WRAPPER_MODULES = {
     "LTCUSDT": "detectors.price_touch_hierarchy_v1.runners.run_ltcusdt_price_touch_hierarchy",
     "OPUSDT": "detectors.price_touch_hierarchy_v1.runners.run_opusdt_price_touch_hierarchy",
     "DOTUSDT": "detectors.price_touch_hierarchy_v1.runners.run_dotusdt_price_touch_hierarchy",
+    "XRPUSDT": "detectors.price_touch_hierarchy_v1.runners.run_xrpusdt_price_touch_hierarchy",
+    "DOGEUSDT": "detectors.price_touch_hierarchy_v1.runners.run_dogeusdt_price_touch_hierarchy",
+    "ADAUSDT": "detectors.price_touch_hierarchy_v1.runners.run_adausdt_price_touch_hierarchy",
+    "SOLUSDT": "detectors.price_touch_hierarchy_v1.runners.run_solusdt_price_touch_hierarchy",
 }
 DEBUG_CONFIGURATION_NAMES = {
     symbol: f"Debug {symbol} Price Touch Hierarchy" for symbol in WRAPPER_MODULES
@@ -845,7 +855,7 @@ PRESERVED_LAUNCH_NAMES = (
 def _tracked_output_stats() -> dict[str, tuple[int, int]]:
     stats: dict[str, tuple[int, int]] = {}
     desktop = Path(r"C:\Users\oranb\Desktop")
-    for symbol in SYMBOLS:
+    for symbol in SUPPORTED_SYMBOLS:
         for path in desktop.glob(f"{symbol}_MTF_Most_Touched_Levels_rev*.xlsx"):
             if path.name.startswith("~$"):
                 continue
@@ -861,7 +871,7 @@ def _tracked_output_stats() -> dict[str, tuple[int, int]]:
             stats[str(path)] = (item.st_size, item.st_mtime_ns)
     source = Path(r"C:\MarketData\derived\binance\futures\um\perpetual")
     for timeframe in TIMEFRAMES:
-        for symbol in SYMBOLS:
+        for symbol in SUPPORTED_SYMBOLS:
             for path in (source / timeframe / f"symbol={symbol}").rglob("*.parquet"):
                 item = path.stat()
                 stats[str(path)] = (item.st_size, item.st_mtime_ns)
@@ -869,12 +879,12 @@ def _tracked_output_stats() -> dict[str, tuple[int, int]]:
 
 
 class SymbolRunnerTests(unittest.TestCase):
-    def test_80_exactly_nine_wrapper_modules_exist(self) -> None:
+    def test_80_exactly_thirteen_wrapper_modules_exist(self) -> None:
         folder = PROJECT_ROOT / "detectors" / "price_touch_hierarchy_v1" / "runners"
         found = sorted(path.name for path in folder.glob("run_*_price_touch_hierarchy.py"))
         expected = sorted(module.rsplit(".", 1)[-1] + ".py" for module in WRAPPER_MODULES.values())
         self.assertEqual(found, expected)
-        self.assertEqual(len(found), 9)
+        self.assertEqual(len(found), 13)
         self.assertTrue((folder / "__init__.py").is_file())
 
     def test_81_each_wrapper_declares_its_fixed_symbol_and_shared_api(self) -> None:
@@ -974,7 +984,7 @@ class SymbolRunnerTests(unittest.TestCase):
                 self.assertEqual(module.main(), 0)
         shared.assert_called_once_with("AVAXUSDT")
         with patch.object(runner, "main") as shared:
-            self.assertEqual(run_for_symbol_cli("DOGEUSDT"), 2)
+            self.assertEqual(run_for_symbol_cli("NOTUSDT"), 2)
         shared.assert_not_called()
 
     def test_86_shared_success_and_failure_exit_codes_pass_through(self) -> None:
@@ -1303,6 +1313,102 @@ class DesktopOutputTests(unittest.TestCase):
                 self.assertEqual(runner.scan_revisions("AVAXUSDT"), [1])
                 self.assertEqual(runner.scan_revisions("BTCUSDT"), [3])
                 self.assertEqual(next_revision(runner.scan_revisions("AVAXUSDT")), 2)
+
+
+class ExtensionSymbolTests(unittest.TestCase):
+    def test_98_four_profiles_are_explicit_and_isolated(self) -> None:
+        import config
+
+        self.assertEqual(PRICE_TOUCH_EXTENSION_SYMBOLS, ("XRPUSDT", "DOGEUSDT", "ADAUSDT", "SOLUSDT"))
+        self.assertEqual(SUPPORTED_SYMBOLS, SYMBOLS + PRICE_TOUCH_EXTENSION_SYMBOLS)
+        self.assertEqual(len(set(SUPPORTED_SYMBOLS)), 13)
+        self.assertTrue(set(PRICE_TOUCH_EXTENSION_SYMBOLS).isdisjoint(SYMBOLS))
+        self.assertEqual(tuple(config.ALLOWED_SYMBOLS), SYMBOLS)
+        self.assertEqual(selected_symbols(["--all-symbols"]), list(SYMBOLS))
+        self.assertEqual(selected_symbols([]), ["BTCUSDT"])
+        for symbol in PRICE_TOUCH_EXTENSION_SYMBOLS:
+            self.assertEqual(selected_symbols(["--symbol", symbol]), [symbol])
+            profile = symbol_profile(symbol)
+            self.assertEqual(profile.tradingview_symbol, f"BINANCE:{symbol}.P")
+            self.assertEqual(profile.workbook_family, f"{symbol}_MTF_Most_Touched_Levels_revNN.xlsx")
+            self.assertEqual(profile.report_name, f"price_touch_hierarchy_{symbol}.json")
+            self.assertEqual(profile.log_name, f"price_touch_hierarchy_{symbol}.log")
+            self.assertEqual(profile.algorithm_version, ALGORITHM_VERSION)
+            self.assertEqual(dict(profile.expected_rows), {"1h": 24744, "4h": 6186, "1d": 1031})
+            self.assertEqual(dict(profile.expected_partitions), {"1h": 34, "4h": 34, "1d": 3})
+            self.assertEqual(profile.first_open_utc, "2024-01-01T00:00:00Z")
+            self.assertEqual(profile.last_close_utc, "2026-10-27T23:59:59.999Z")
+            self.assertEqual(profile.exclusive_end_utc, "2026-10-28T00:00:00Z")
+            sources = source_dataset(symbol)
+            for timeframe, path in sources.items():
+                text = str(path).replace("\\", "/")
+                self.assertIn(f"/{timeframe}/symbol={symbol}", text)
+                self.assertNotIn("symbol=BTCUSDT", text)
+                self.assertEqual(path, Path(getattr(profile, f"source_{timeframe}")))
+        for bad in ("", "btcusdt", "FOOUSDT", "XRP/USDT", "..\\SOLUSDT", "C:SOLUSDT", "SOL USDT"):
+            with self.assertRaises(ValueError):
+                require_price_touch_symbol(bad)
+            with self.assertRaises(ValueError):
+                source_dataset(bad)
+
+    def test_99_extension_workbook_uses_the_shared_schema(self) -> None:
+        import zipfile
+
+        from openpyxl import load_workbook
+
+        result = analyze({"1h": _qualified_hour_bars()})
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "XRPUSDT_MTF_Most_Touched_Levels_rev00.xlsx"
+            context = {
+                "symbol": "XRPUSDT",
+                "revision_name": target.name,
+                "diagnostic_rows": [
+                    ["implementation", "symbol", "XRPUSDT"],
+                    ["thresholds", "1h_minimum_completed_candle_touches", 40],
+                    ["thresholds", "4h_minimum_completed_candle_touches", 20],
+                    ["thresholds", "1d_minimum_completed_candle_touches", 10],
+                    ["counts", "duplicate_touch_keys", 0],
+                ],
+            }
+            write_workbook(target, result, context, "XRPUSDT synthetic workbook")
+            validate_saved_workbook(target, "XRPUSDT")
+            with zipfile.ZipFile(target) as archive:
+                self.assertIsNone(archive.testzip())
+                names = set(archive.namelist())
+                self.assertNotIn("xl/vbaProject.bin", names)
+            for kwargs in ({}, {"read_only": True}, {"data_only": True}):
+                book = load_workbook(target, **kwargs)
+                try:
+                    self.assertEqual(tuple(book.sheetnames), (
+                        "Executive Summary", "Hierarchical Ranking", "1D Levels", "4H Levels",
+                        "1H Levels", "Cross-TF Mapping", "Top Level Touches", "Monthly Persistence",
+                        "Suppressed Levels", "Rejected Candidates", "Parameters", "Diagnostics", "README",
+                    ))
+                finally:
+                    book.close()
+            book = load_workbook(target, data_only=True)
+            try:
+                sheet = book["Hierarchical Ranking"]
+                headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
+                rank_at = headers.index("Overall Hierarchical Rank")
+                price_at = headers.index("Representative Price")
+                lower_at = headers.index("Consolidated Zone Lower")
+                upper_at = headers.index("Consolidated Zone Upper")
+                present_at = headers.index("Timeframes Present")
+                ranks = []
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    if row[rank_at] is None:
+                        continue
+                    ranks.append(int(row[rank_at]))
+                    price = row[price_at]
+                    self.assertIsInstance(price, (int, float))
+                    self.assertLessEqual(float(row[lower_at]), float(price))
+                    self.assertLessEqual(float(price), float(row[upper_at]))
+                    present = str(row[present_at] or "")
+                    self.assertGreaterEqual(int(row[headers.index("1H Completed-Candle Touches")] or 0), 0)
+                self.assertEqual(ranks, list(range(1, len(ranks) + 1)))
+            finally:
+                book.close()
 
 
 if __name__ == "__main__":

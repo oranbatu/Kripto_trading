@@ -39,7 +39,7 @@ A real RUN is a production run. Each selected detector may publish its next Exce
 
 `range_detector_4h_v1` is shown with its checkbox disabled. The package has bytecode only and no Python source runner.
 
-The generic price-touch command is not a checkbox. The nine symbol wrappers are separate entries, and none of them passes `--all-symbols`.
+The generic price-touch command is not a checkbox. Thirteen symbol wrappers are separate entries, and none of them passes `--all-symbols`. `--all-symbols` on the generic runner still means the original nine symbols only.
 
 The 30-minute special swing detector is also nine separate Swing Detectors entries. Each one runs only its fixed symbol through the shared detector. Selecting several of them runs those wrappers one after another in registry order. There is no all-symbol swing command.
 

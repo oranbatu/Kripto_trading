@@ -170,6 +170,58 @@
       "env": {
         "PYTHONPATH": "${workspaceFolder}"
       }
+    },
+    {
+      "name": "Debug XRPUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_xrpusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug DOGEUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_dogeusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug ADAUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_adausdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Debug SOLUSDT Price Touch Hierarchy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "detectors.price_touch_hierarchy_v1.runners.run_solusdt_price_touch_hierarchy",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
     }
   ]
 }

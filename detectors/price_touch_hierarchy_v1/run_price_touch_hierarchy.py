@@ -53,6 +53,7 @@ from detectors.price_touch_hierarchy_v1.touch_config import (
     LOGS_DIR,
     REPORTS_DIR,
     RUNNER_VERSION,
+    SUPPORTED_SYMBOLS,
     SYMBOLS,
     TIMEFRAMES,
     TMP_DIR,
@@ -82,7 +83,7 @@ def selected_symbols(argv: list[str] | None = None) -> list[str]:
         return list(SYMBOLS)
     if args.symbol is None:
         return [DEFAULT_SYMBOL]
-    if args.symbol not in SYMBOLS:
+    if args.symbol not in SUPPORTED_SYMBOLS:
         raise SymbolSelectionError(f"unsupported symbol {args.symbol}")
     return [args.symbol]
 
@@ -108,7 +109,7 @@ def run_for_symbol_cli(symbol: str) -> int:
     symbol-specific wrapper cannot be redirected with ``--symbol`` or
     ``--all-symbols``.
     """
-    if symbol not in SYMBOLS:
+    if symbol not in SUPPORTED_SYMBOLS:
         print(f"SYMBOL_SELECTION_FAILED unsupported symbol {symbol}", flush=True)
         return 2
     return main(["--symbol", symbol])
@@ -173,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_for_symbol(symbol: str) -> dict[str, Any]:
-    if symbol not in SYMBOLS:
+    if symbol not in SUPPORTED_SYMBOLS:
         raise SymbolSelectionError(f"unsupported symbol {symbol}")
     started = time.perf_counter()
     location = visible_desktop()
@@ -253,7 +254,7 @@ def run_for_symbol(symbol: str) -> dict[str, Any]:
 
 
 def load_production(symbol: str = DEFAULT_SYMBOL) -> dict[str, Any]:
-    if symbol not in SYMBOLS:
+    if symbol not in SUPPORTED_SYMBOLS:
         raise SourceValidationError(f"unsupported symbol {symbol}")
     bars: dict[str, list[Bar]] = {}
     source_paths: list[str] = []

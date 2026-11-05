@@ -60,6 +60,10 @@ TASKS: tuple[DetectorTask, ...] = (
     _price("LTCUSDT"),
     _price("OPUSDT"),
     _price("DOTUSDT"),
+    _price("XRPUSDT"),
+    _price("DOGEUSDT"),
+    _price("ADAUSDT"),
+    _price("SOLUSDT"),
     *[
         DetectorTask(
             id=f"swing_30m_{symbol.lower()}",

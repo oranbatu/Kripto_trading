@@ -95,9 +95,9 @@ These labels do not change rank:
 
 # How to run
 
-One runner analyzes each supported USD-M perpetual independently. The symbol
-order is BTCUSDT, ETHUSDT, AVAXUSDT, AAVEUSDT, NEARUSDT, LINKUSDT, LTCUSDT,
-OPUSDT, DOTUSDT. No arguments keep the original BTCUSDT workflow.
+Nine original symbols remain the `--all-symbols` batch. Four later symbols are available through their own wrappers and are not added to that batch:
+
+BTCUSDT, ETHUSDT, AVAXUSDT, AAVEUSDT, NEARUSDT, LINKUSDT, LTCUSDT, OPUSDT, DOTUSDT, then XRPUSDT, DOGEUSDT, ADAUSDT, SOLUSDT. No arguments keep the original BTCUSDT workflow. `--all-symbols` still runs only the original nine.
 
 Current source coverage for every symbol is `2024-01-01T00:00:00Z` through
 `2026-10-27T23:59:59.999Z`. The loader uses the half-open end
@@ -116,7 +116,7 @@ python detectors\price_touch_hierarchy_v1\run_price_touch_hierarchy.py --all-sym
 `--symbol` and `--all-symbols` cannot be combined. An unknown symbol exits
 with an error and does not fall back to BTCUSDT.
 
-Nine thin wrappers live in `runners/` and call the same `run_for_symbol_cli`
+Thirteen thin wrappers live in `runners/` and call the same `run_for_symbol_cli`
 function. They do not contain a second copy of the touch, zone, hierarchy,
 ranking, workbook, or revision logic. Each wrapper is fixed to one symbol:
 
@@ -130,6 +130,10 @@ python -m detectors.price_touch_hierarchy_v1.runners.run_linkusdt_price_touch_hi
 python -m detectors.price_touch_hierarchy_v1.runners.run_ltcusdt_price_touch_hierarchy
 python -m detectors.price_touch_hierarchy_v1.runners.run_opusdt_price_touch_hierarchy
 python -m detectors.price_touch_hierarchy_v1.runners.run_dotusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_xrpusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_dogeusdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_adausdt_price_touch_hierarchy
+python -m detectors.price_touch_hierarchy_v1.runners.run_solusdt_price_touch_hierarchy
 ```
 
 Run these from the project root with `.venv\Scripts\python.exe`. A wrapper
@@ -138,11 +142,15 @@ market. Importing a wrapper does not read Parquet data or create a workbook.
 Executing one publishes only that symbol's next Desktop revision and writes
 only `reports\price_touch_hierarchy_<SYMBOL>.json` and
 `logs\price_touch_hierarchy_<SYMBOL>.log`. The batch report is written only
-by `--all-symbols`.
+by `--all-symbols`, which still covers the original nine symbols.
+
+The Detector Control Center lists thirteen separate Price Touch tasks, one
+per wrapper, in the same symbol order. None of those tasks passes `--symbol`
+or `--all-symbols`.
 
 Cursor Run and Debug can launch each wrapper separately. The local
 configuration names are `Debug BTCUSDT Price Touch Hierarchy` through
-`Debug DOTUSDT Price Touch Hierarchy`. Select one and press F5. The session
+`Debug SOLUSDT Price Touch Hierarchy`. Select one and press F5. The session
 uses the project virtual environment and the integrated terminal. A real debug
 run is a production run: it creates that symbol's next workbook revision.
 `.vscode/launch.json` and `.vscode/settings.json` stay local because `.vscode/`
@@ -168,7 +176,7 @@ combined into the revision scan. The scan uses
 `^<SYMBOL>_MTF_Most_Touched_Levels_rev(\d{2,})\.xlsx$`. The first workbook for
 a symbol in that folder is `rev00`. Later runs use maximum existing revision
 + 1, do not fill gaps, and do not overwrite an existing file. Another symbol's
-workbooks are ignored. All nine wrappers and the generic runner share this
+workbooks are ignored. All thirteen wrappers and the generic runner share this
 one output resolver and the one analytical engine.
 
 Tests:

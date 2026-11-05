@@ -32,7 +32,18 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(ids, [task.id for task in TASKS])
 
     def test_price_touch_entries_are_fixed_symbol_modules(self) -> None:
-        symbols = ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "AAVEUSDT", "NEARUSDT", "LINKUSDT", "LTCUSDT", "OPUSDT", "DOTUSDT")
+        symbols = (
+            "BTCUSDT", "ETHUSDT", "AVAXUSDT", "AAVEUSDT", "NEARUSDT",
+            "LINKUSDT", "LTCUSDT", "OPUSDT", "DOTUSDT",
+            "XRPUSDT", "DOGEUSDT", "ADAUSDT", "SOLUSDT",
+        )
+        price_tasks = [task for task in TASKS if task.category == "Price Touch Hierarchy"]
+        self.assertEqual([task.symbol for task in price_tasks], list(symbols))
+        self.assertEqual(len(price_tasks), 13)
+        self.assertNotIn(
+            "detectors.price_touch_hierarchy_v1.run_price_touch_hierarchy",
+            [task.module for task in TASKS],
+        )
         for symbol in symbols:
             task = task_by_id(f"price_touch_{symbol.lower()}")
             self.assertEqual(task.symbol, symbol)
@@ -196,12 +207,31 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
     def test_cancel_and_import_do_not_run_detectors(self) -> None:
+        def detector_modules() -> set[str]:
+            return {name for name in sys.modules if name == "detectors" or name.startswith("detectors.")}
+
+        # Other suites may already have imported a detector. This test checks
+        # that cancellation and dry-run do not import or execute any more.
+        before = detector_modules()
         with tempfile.TemporaryDirectory() as folder:
             lock = Path(folder) / "session.lock"
-            code = main([], lock_path=lock, opener=lambda: None, runner=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ran")))
+            code = main(
+                [],
+                lock_path=lock,
+                opener=lambda: None,
+                runner=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ran")),
+            )
             self.assertEqual(code, 0)
             self.assertFalse(lock.exists())
-        self.assertFalse(any(name.startswith("detectors.") for name in sys.modules))
+            dry_code = main(
+                ["--dry-run"],
+                lock_path=lock,
+                opener=lambda: (task_by_id("price_touch_solusdt"),),
+                runner=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ran")),
+            )
+            self.assertEqual(dry_code, 0)
+            self.assertFalse(lock.exists())
+        self.assertEqual(detector_modules(), before)
 
 
 class WindowTests(unittest.TestCase):
@@ -224,9 +254,9 @@ class WindowTests(unittest.TestCase):
             window.state.query = ""
             window.refresh()
             window.select_visible()
-            self.assertEqual(window.state.count(), 9)
+            self.assertEqual(window.state.count(), 13)
             self.assertNotIn("disabled", window.run_button.state())
-            self.assertIn("RUN 9", window.run_button.cget("text"))
+            self.assertIn("RUN 13", window.run_button.cget("text"))
             window.clear()
             self.assertEqual(window.state.count(), 0)
             window.cancel()
