@@ -40,6 +40,14 @@ from processing.timeframes.sibling_scope import (  # noqa: E402
     defects_clear,
     new_defect_tally,
 )
+from processing.timeframes.symbol_scope import (  # noqa: E402
+    publication_symbols,
+    recognized_symbols,
+    scale_from_nine,
+    selected_files,
+    unknown_symbols,
+    validation_symbols,
+)
 
 try:
     import pyarrow as pa
@@ -384,7 +392,7 @@ def _unexpected_hive_files(root: Path) -> list[str]:
         except StopIteration:
             extra.append(str(p))
             continue
-        if sym not in SYMBOLS:
+        if sym not in recognized_symbols():
             extra.append(str(p))
     return extra
 
@@ -393,13 +401,15 @@ def discover_partitions(
     source_root: Path,
     secondary_root: Path,
     output_root: Path,
+    symbols: tuple[str, ...] | None = None,
     require_expected_counts: bool = True,
 ) -> list[PartitionRef]:
+    chosen = tuple(symbols) if symbols is not None else SYMBOLS
     rs, re_ = ms_of(RANGE_START_UTC), ms_of(RANGE_END_UTC)
     out: list[PartitionRef] = []
     missing_1m: list[str] = []
     missing_15m: list[str] = []
-    for symbol in SYMBOLS:
+    for symbol in chosen:
         for year, month in iter_year_months(RANGE_START_UTC, RANGE_END_UTC):
             m_first, m_last = month_bounds_ms(year, month)
             start_ms, end_ms = max(m_first, rs), min(m_last, re_)
@@ -424,12 +434,10 @@ def discover_partitions(
         raise RuntimeError(f"unexpected canonical 1m files: {extra_1m[:10]}")
     if extra_15m:
         raise RuntimeError(f"unexpected derived 15m files: {extra_15m[:10]}")
-    if require_expected_counts:
-        if len(out) != EXPECTED_SOURCE_PARTITIONS:
-            raise RuntimeError(f"discovered {len(out)} source partitions, expected {EXPECTED_SOURCE_PARTITIONS}")
-        n15 = len(list(secondary_root.rglob("data.parquet")))
-        if n15 != EXPECTED_SECONDARY_PARTITIONS:
-            raise RuntimeError(f"discovered {n15} 15m partitions, expected {EXPECTED_SECONDARY_PARTITIONS}")
+    if require_expected_counts and len(out) != 34 * len(chosen):
+        raise RuntimeError(
+            f"discovered {len(out)} source partitions, expected {34 * len(chosen)} for {len(chosen)} symbols"
+        )
     return out
 
 
@@ -1201,13 +1209,16 @@ def independent_scan(
     output_root: Path,
     partitions: list[PartitionRef],
 ) -> dict:
+    chosen = tuple(dict.fromkeys(part.symbol for part in partitions)) or tuple(SYMBOLS)
+    EXPECTED_OUTPUT_ROWS_TOTAL = EXPECTED_OUTPUT_ROWS_PER_SYMBOL * len(chosen)
+    EXPECTED_OUTPUT_PARTITIONS = 34 * len(chosen)
     files = sorted(output_root.rglob("data.parquet")) if output_root.exists() else []
     parts_left = list(output_root.rglob("*.part")) if output_root.exists() else []
     scope = assess_derived_siblings(output_root.parent, OUTPUT_INTERVAL)
     other_tf = scope["other_timeframes_present"]
     defects = new_defect_tally()
     symbols = sorted({p.parent.parent.parent.name.split("=", 1)[1] for p in files}) if files else []
-    rows_by_sym: dict[str, int] = {s: 0 for s in SYMBOLS}
+    rows_by_sym: dict[str, int] = {s: 0 for s in chosen}
     first_last: dict[str, list[int]] = {}
     last_close: dict[str, int] = {}
     eq_fail = 0
@@ -1217,7 +1228,7 @@ def independent_scan(
     continuity_fail = 0
     canonical_passed = 0
     secondary_passed = 0
-    prev_last: dict[str, Optional[int]] = {s: None for s in SYMBOLS}
+    prev_last: dict[str, Optional[int]] = {s: None for s in chosen}
 
     for part in partitions:
         if not part.output_path.is_file():
@@ -1254,10 +1265,10 @@ def independent_scan(
             prev_last[part.symbol] = out[-1].open_ms
     total = sum(rows_by_sym.values())
     all_ok = (
-        len(files) == EXPECTED_OUTPUT_PARTITIONS
-        and symbols == sorted(SYMBOLS)
+        len(selected_files(files, chosen)) == EXPECTED_OUTPUT_PARTITIONS
+        and set(chosen) <= set(symbols) and not unknown_symbols(symbols)
         and total == EXPECTED_OUTPUT_ROWS_TOTAL
-        and all(v == EXPECTED_OUTPUT_ROWS_PER_SYMBOL for v in rows_by_sym.values())
+        and all(rows_by_sym.get(s) == EXPECTED_OUTPUT_ROWS_PER_SYMBOL for s in chosen)
         and eq_fail == 0 and sec_fail == 0 and align_fail == 0 and src_count_fail == 0
         and continuity_fail == 0
         and canonical_passed == EXPECTED_OUTPUT_ROWS_TOTAL
@@ -1269,7 +1280,7 @@ def independent_scan(
         and all(iso_of_ms_us(v) == EXPECTED_LAST_CLOSE for v in last_close.values())
     )
     return {
-        "parquet_files": len(files),
+        "parquet_files": len(selected_files(files, chosen)),
         "part_files": len(parts_left),
         "other_timeframes_present": other_tf,
         "approved_timeframes_present": scope["approved_timeframes_present"],
@@ -1277,7 +1288,7 @@ def independent_scan(
         "no_other_timeframes": scope["no_other_timeframes"],
         "defects": defects,
         "symbols": symbols,
-        "unexpected_symbols": [s for s in symbols if s not in SYMBOLS],
+        "unexpected_symbols": unknown_symbols(symbols),
         "rows_by_symbol": rows_by_sym,
         "total_rows": total,
         "first_open_time_utc": {s: iso_of_ms(v[0]) for s, v in first_last.items()},
@@ -1661,11 +1672,16 @@ def summarize(records: list[dict]) -> dict:
 
 
 def print_plan(partitions: list[PartitionRef], already: int) -> None:
+    chosen = tuple(dict.fromkeys(part.symbol for part in partitions))
+    EXPECTED_OUTPUT_ROWS_TOTAL = EXPECTED_OUTPUT_ROWS_PER_SYMBOL * len(chosen)
+    EXPECTED_SOURCE_ROWS_TOTAL = EXPECTED_SOURCE_ROWS_PER_SYMBOL * len(chosen)
+    EXPECTED_OUTPUT_PARTITIONS = 34 * len(chosen)
+    EXPECTED_SOURCE_PARTITIONS = 34 * len(chosen)
     for line in (
         "=" * 100,
         "30m PROCESSING PLAN -- derive UTC-aligned 30m from canonical 1m only",
         "NOT a downloader. NOT 1h/4h/1d. NOT Turkey time. NOT generated from 15m.",
-        f"Symbols ({len(SYMBOLS)}): {', '.join(SYMBOLS)}",
+        f"Selected symbols ({len(chosen)}): {', '.join(chosen)}",
         f"Primary source (read-only): {CANONICAL_1M_ROOT}",
         f"  partitions={len(partitions)} expected={EXPECTED_SOURCE_PARTITIONS}  1m rows={EXPECTED_SOURCE_ROWS_TOTAL}",
         f"Secondary 15m (read-only cross-check): {DERIVED_15M_ROOT}",
@@ -1694,7 +1710,12 @@ def run_production(run_id: str, started: datetime) -> tuple[int, dict]:
     DERIVED_30M_ROOT.mkdir(parents=True, exist_ok=True)
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
-    partitions = discover_partitions(CANONICAL_1M_ROOT, DERIVED_15M_ROOT, DERIVED_30M_ROOT)
+    chosen = publication_symbols(SYMBOLS)
+    EXPECTED_OUTPUT_ROWS_TOTAL = EXPECTED_OUTPUT_ROWS_PER_SYMBOL * len(chosen)
+    EXPECTED_SOURCE_ROWS_TOTAL = EXPECTED_SOURCE_ROWS_PER_SYMBOL * len(chosen)
+    EXPECTED_OUTPUT_PARTITIONS = 34 * len(chosen)
+    EXPECTED_SOURCE_PARTITIONS = 34 * len(chosen)
+    partitions = discover_partitions(CANONICAL_1M_ROOT, DERIVED_15M_ROOT, DERIVED_30M_ROOT, symbols=chosen)
     already = sum(1 for p in partitions if p.output_path.exists())
     print_plan(partitions, already)
 
@@ -1758,7 +1779,7 @@ def run_production(run_id: str, started: datetime) -> tuple[int, dict]:
     now = datetime.now(timezone.utc)
     dataset_validation = {
         "parquet_files_ok": scan["parquet_files"] == EXPECTED_OUTPUT_PARTITIONS,
-        "symbols_ok": scan["symbols"] == sorted(SYMBOLS),
+        "symbols_ok": set(chosen) <= set(scan["symbols"]) and not scan["unexpected_symbols"],
         "rows_per_symbol_ok": all(v == EXPECTED_OUTPUT_ROWS_PER_SYMBOL for v in scan["rows_by_symbol"].values()),
         "total_rows_ok": scan["total_rows"] == EXPECTED_OUTPUT_ROWS_TOTAL,
         "first_open_ok": all(v == EXPECTED_FIRST_OPEN for v in scan["first_open_time_utc"].values()),
@@ -1838,7 +1859,7 @@ def run_production(run_id: str, started: datetime) -> tuple[int, dict]:
         "source_root": str(CANONICAL_1M_ROOT),
         "secondary_root": str(DERIVED_15M_ROOT),
         "output_root": str(DERIVED_30M_ROOT),
-        "requested_symbols": list(SYMBOLS),
+        "requested_symbols": list(chosen),
         "expected": {
             "source_partitions": EXPECTED_SOURCE_PARTITIONS,
             "secondary_partitions": EXPECTED_SECONDARY_PARTITIONS,
@@ -1875,7 +1896,7 @@ def run_production(run_id: str, started: datetime) -> tuple[int, dict]:
         scan["parquet_files"], immut_raw["unchanged"], immut_1m["unchanged"], immut_15m["unchanged"],
         scan["all_counts_expected"], dataset_validation["all_passed"],
     )
-    for s in SYMBOLS:
+    for s in chosen:
         ps = summ["per_symbol"].get(s, {})
         log.info(
             "%-9s 30m_rows=%s source_1m=%s %s .. %s close_last=%s",
@@ -1907,7 +1928,8 @@ def run_production(run_id: str, started: datetime) -> tuple[int, dict]:
 
 def validate_published() -> dict:
     """Recompute 30m checks from published Parquet. Does not create or replace partitions."""
-    partitions = discover_partitions(CANONICAL_1M_ROOT, DERIVED_15M_ROOT, DERIVED_30M_ROOT)
+    chosen = validation_symbols(OUTPUT_INTERVAL)
+    partitions = discover_partitions(CANONICAL_1M_ROOT, DERIVED_15M_ROOT, DERIVED_30M_ROOT, symbols=chosen)
     return independent_scan(CANONICAL_1M_ROOT, DERIVED_15M_ROOT, DERIVED_30M_ROOT, partitions)
 
 

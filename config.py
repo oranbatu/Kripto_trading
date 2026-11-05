@@ -21,6 +21,35 @@ ALLOWED_SYMBOLS: tuple[str, ...] = (
     "OPUSDT",
     "DOTUSDT",
 )
+# Added after the original nine. Derived 5m/15m/30m/1h/4h/1d partitions are published.
+NEW_CANONICAL_1M_SYMBOLS: tuple[str, ...] = (
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "SOLUSDT",
+)
+CANONICAL_1M_SYMBOLS: tuple[str, ...] = ALLOWED_SYMBOLS + NEW_CANONICAL_1M_SYMBOLS
+
+
+def symbols_for_timeframe(timeframe: str) -> tuple[str, ...]:
+    """Every published timeframe includes the original nine and the four added symbols."""
+    if timeframe not in ("1m", "5m", "15m", "30m", "1h", "4h", "1d"):
+        raise ValueError(f"unsupported timeframe {timeframe!r}")
+    return CANONICAL_1M_SYMBOLS
+
+
+def require_canonical_symbols(symbols: tuple[str, ...]) -> tuple[str, ...]:
+    """Reject unknown, empty, and path-like symbols before any archive or Parquet work."""
+    if type(symbols) is not tuple or not symbols:
+        raise ValueError("symbol selection must be a non-empty tuple from the canonical 1m allowlist")
+    for symbol in symbols:
+        if (
+            type(symbol) is not str
+            or symbol not in CANONICAL_1M_SYMBOLS
+            or any(part in symbol for part in ("/", "\\", "..", ":", " "))
+        ):
+            raise ValueError(f"unsupported symbol {symbol!r}")
+    return symbols
 
 ALLOWED_TIMEFRAMES: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
 
@@ -130,9 +159,9 @@ TIMEFRAME_SPECS: Mapping[str, TimeframeSpec] = {
         partitioning="symbol_year_month",
         location="processed",
         schema_version="um-perp-1m-canonical-v1",
-        expected_files=306,
+        expected_files=442,
         expected_rows_per_symbol=1_484_640,
-        expected_total_rows=13_361_760,
+        expected_total_rows=19_300_320,
         first_open_utc=_utc(2024, 1, 1),
         last_open_utc=_utc(2026, 10, 27, 23, 59),
         source_candles_per_output=1,
@@ -144,9 +173,9 @@ TIMEFRAME_SPECS: Mapping[str, TimeframeSpec] = {
         partitioning="symbol_year_month",
         location="derived",
         schema_version="um-perp-5m-derived-v1",
-        expected_files=306,
+        expected_files=442,
         expected_rows_per_symbol=296_928,
-        expected_total_rows=2_672_352,
+        expected_total_rows=3_860_064,
         first_open_utc=_utc(2024, 1, 1),
         last_open_utc=_utc(2026, 10, 27, 23, 55),
         source_candles_per_output=5,
@@ -158,9 +187,9 @@ TIMEFRAME_SPECS: Mapping[str, TimeframeSpec] = {
         partitioning="symbol_year_month",
         location="derived",
         schema_version="um-perp-15m-derived-v1",
-        expected_files=306,
+        expected_files=442,
         expected_rows_per_symbol=98_976,
-        expected_total_rows=890_784,
+        expected_total_rows=1_286_688,
         first_open_utc=_utc(2024, 1, 1),
         last_open_utc=_utc(2026, 10, 27, 23, 45),
         source_candles_per_output=15,
@@ -172,9 +201,9 @@ TIMEFRAME_SPECS: Mapping[str, TimeframeSpec] = {
         partitioning="symbol_year_month",
         location="derived",
         schema_version="um-perp-30m-derived-v1",
-        expected_files=306,
+        expected_files=442,
         expected_rows_per_symbol=49_488,
-        expected_total_rows=445_392,
+        expected_total_rows=643_344,
         first_open_utc=_utc(2024, 1, 1),
         last_open_utc=_utc(2026, 10, 27, 23, 30),
         source_candles_per_output=30,
@@ -186,9 +215,9 @@ TIMEFRAME_SPECS: Mapping[str, TimeframeSpec] = {
         partitioning="symbol_year_month",
         location="derived",
         schema_version="um-perp-1h-derived-v1",
-        expected_files=306,
+        expected_files=442,
         expected_rows_per_symbol=24_744,
-        expected_total_rows=222_696,
+        expected_total_rows=321_672,
         first_open_utc=_utc(2024, 1, 1),
         last_open_utc=_utc(2026, 10, 27, 23, 0),
         source_candles_per_output=60,
@@ -200,9 +229,9 @@ TIMEFRAME_SPECS: Mapping[str, TimeframeSpec] = {
         partitioning="symbol_year_month",
         location="derived",
         schema_version="um-perp-4h-derived-v1",
-        expected_files=306,
+        expected_files=442,
         expected_rows_per_symbol=6_186,
-        expected_total_rows=55_674,
+        expected_total_rows=80_418,
         first_open_utc=_utc(2024, 1, 1),
         last_open_utc=_utc(2026, 10, 27, 20, 0),
         source_candles_per_output=240,
@@ -214,9 +243,9 @@ TIMEFRAME_SPECS: Mapping[str, TimeframeSpec] = {
         partitioning="symbol_year",
         location="derived",
         schema_version="um-perp-1d-derived-v1",
-        expected_files=27,
+        expected_files=39,
         expected_rows_per_symbol=1_031,
-        expected_total_rows=9_279,
+        expected_total_rows=13_403,
         first_open_utc=_utc(2024, 1, 1),
         last_open_utc=_utc(2026, 10, 27),
         source_candles_per_output=1440,

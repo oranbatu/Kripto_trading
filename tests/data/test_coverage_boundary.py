@@ -63,7 +63,7 @@ class CoverageBoundaryTests(unittest.TestCase):
     def test_metadata_matches_verified_inventory(self) -> None:
         self.assertEqual(
             {tf: spec.expected_files for tf, spec in config.TIMEFRAME_SPECS.items()},
-            {"1m": 306, "5m": 306, "15m": 306, "30m": 306, "1h": 306, "4h": 306, "1d": 27},
+            {"1m": 442, "5m": 442, "15m": 442, "30m": 442, "1h": 442, "4h": 442, "1d": 39},
         )
         self.assertEqual(
             {tf: spec.expected_rows_per_symbol for tf, spec in config.TIMEFRAME_SPECS.items()},
@@ -74,26 +74,28 @@ class CoverageBoundaryTests(unittest.TestCase):
             self.assertEqual(spec.last_open_utc, LAST_OPENS[timeframe], timeframe)
             exclusive = spec.last_open_utc + timedelta(milliseconds=spec.duration_ms)
             self.assertEqual(exclusive, DATASET_END, timeframe)
-            self.assertEqual(spec.expected_rows_per_symbol * len(config.ALLOWED_SYMBOLS), spec.expected_total_rows)
+            symbols = config.symbols_for_timeframe(timeframe)
+            self.assertEqual(spec.expected_rows_per_symbol * len(symbols), spec.expected_total_rows)
             if timeframe == "1d":
                 self.assertEqual(spec.partitioning, "symbol_year")
                 self.assertEqual(spec.expected_rows_per_symbol, 366 + 365 + 300)
             else:
                 self.assertEqual(spec.partitioning, "symbol_year_month")
-                self.assertEqual(spec.expected_files, 34 * len(config.ALLOWED_SYMBOLS))
+                self.assertEqual(spec.expected_files, 34 * len(symbols))
 
     def test_catalog_months_and_years_are_exact(self) -> None:
         catalog = DataCatalog()
         for timeframe in ("1m", "5m", "15m", "30m", "1h", "4h"):
             keys = expected_partition_keys(timeframe)
-            self.assertEqual(len(keys), 306, timeframe)
-            self.assertEqual(len(set(keys)), 306, timeframe)
+            expected_count = 34 * len(config.symbols_for_timeframe(timeframe))
+            self.assertEqual(len(keys), expected_count, timeframe)
+            self.assertEqual(len(set(keys)), expected_count, timeframe)
             months = sorted({(year, month) for _symbol, year, month in keys})
             self.assertEqual(months[0], (2024, 1), timeframe)
             self.assertEqual(months[-1], (2026, 10), timeframe)
             self.assertEqual(len(months), 34, timeframe)
             info = catalog.get_dataset_info(timeframe, inspect_metadata=False)
-            self.assertEqual(info.actual_files, 306, timeframe)
+            self.assertEqual(info.actual_files, expected_count, timeframe)
             self.assertFalse(info.missing_partitions, timeframe)
             self.assertFalse(info.extra_files, timeframe)
             for symbol in config.ALLOWED_SYMBOLS:
@@ -106,11 +108,11 @@ class CoverageBoundaryTests(unittest.TestCase):
                 )
                 self.assertEqual([(p.year, p.month) for p in parts], [(2026, 10)], (timeframe, symbol))
         daily = expected_partition_keys("1d")
-        self.assertEqual(len(daily), 27)
-        self.assertEqual(len(set(daily)), 27)
+        self.assertEqual(len(daily), 39)
+        self.assertEqual(len(set(daily)), 39)
         self.assertEqual(sorted({year for _symbol, year, _month in daily}), [2024, 2025, 2026])
         info = catalog.get_dataset_info("1d", inspect_metadata=False)
-        self.assertEqual(info.actual_files, 27)
+        self.assertEqual(info.actual_files, 39)
         self.assertFalse(info.missing_partitions)
         self.assertFalse(info.extra_files)
         for symbol in config.ALLOWED_SYMBOLS:

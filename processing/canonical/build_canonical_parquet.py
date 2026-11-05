@@ -33,6 +33,12 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterator, Optional
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+import config
+
 try:
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -56,10 +62,8 @@ LOGS_DIR: Path = DATA_ROOT / "logs"
 TMP_ROOT: Path = DATA_ROOT / "tmp" / "canonical_build"          # never under raw/
 QUARANTINE_ROOT: Path = DATA_ROOT / "quarantine" / "canonical"  # processed files only
 
-SYMBOLS: tuple[str, ...] = (
-    "BTCUSDT", "ETHUSDT", "AVAXUSDT", "AAVEUSDT", "NEARUSDT",
-    "LINKUSDT", "LTCUSDT", "OPUSDT", "DOTUSDT",
-)
+SYMBOLS: tuple[str, ...] = config.CANONICAL_1M_SYMBOLS
+NEW_SYMBOLS: tuple[str, ...] = config.NEW_CANONICAL_1M_SYMBOLS
 INTERVAL = "1m"
 RANGE_START_UTC = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
 RANGE_END_UTC = datetime(2026, 10, 27, 23, 59, tzinfo=timezone.utc)
@@ -71,10 +75,10 @@ SCHEMA_VERSION = "um-perp-1m-canonical-v1"
 DECIMAL_PRECISION = 38
 DECIMAL_SCALE = 8          # observed source max: prices 7 dp, quote volumes 8 dp
 FINGERPRINT_WORKERS = 8
-EXPECTED_ZIP_COUNT = 675  # 297 monthly through 2026-09, plus 135 superseded September daily ZIPs and 243 October 1-27 daily ZIPs
+EXPECTED_ZIP_COUNT = 915  # previous 675 raw ZIPs plus 240 archives for the four new symbols
 EXPECTED_ROWS_PER_SYMBOL = 1_484_640
-EXPECTED_ROWS_TOTAL = 13_361_760
-EXPECTED_PARTITION_COUNT = 306   # 9 symbols * 34 months (2024-01 .. 2026-10)
+EXPECTED_ROWS_TOTAL = 19_300_320
+EXPECTED_PARTITION_COUNT = 442   # 13 symbols * 34 months (2024-01 .. 2026-10)
 # =============================================================================
 
 MINUTE_MS = 60_000
@@ -752,7 +756,7 @@ def processed_inventory() -> dict:
     }
 
 
-def overall_equivalence(partition_records: list[dict]) -> dict:
+def overall_equivalence(partition_records: list[dict], expected_total_rows: int | None = None) -> dict:
     by_symbol: dict[str, dict] = {}
     for rec in partition_records:
         s = rec["symbol"]
@@ -777,6 +781,7 @@ def overall_equivalence(partition_records: list[dict]) -> dict:
         if lo and (slot["last_open_time_utc"] is None or lo > slot["last_open_time_utc"]):
             slot["last_open_time_utc"] = lo
     total_rows = sum(v["row_count"] for v in by_symbol.values())
+    expected_rows = EXPECTED_ROWS_TOTAL if expected_total_rows is None else expected_total_rows
     all_eq = all(r.get("equivalent_to_raw") for r in partition_records) and partition_records
     return {
         "all_partitions_equivalent_to_raw": bool(all_eq),
@@ -784,8 +789,8 @@ def overall_equivalence(partition_records: list[dict]) -> dict:
         "verified_or_skipped_equivalent": sum(1 for r in partition_records if r.get("status") in ("verified-equivalent", "skipped-as-already-equivalent")),
         "failed_partitions": sum(1 for r in partition_records if r.get("status") == "failed"),
         "total_parquet_rows": total_rows,
-        "expected_total_rows": EXPECTED_ROWS_TOTAL,
-        "row_count_matches_expected": total_rows == EXPECTED_ROWS_TOTAL,
+        "expected_total_rows": expected_rows,
+        "row_count_matches_expected": total_rows == expected_rows,
         "per_symbol": by_symbol,
     }
 
@@ -817,7 +822,8 @@ def write_report(path: Path, report: dict) -> None:
 
 
 # ----------------------------------------------------------------------------- orchestration
-def run() -> int:
+def run(symbols: tuple[str, ...] | None = None) -> int:
+    selected = SYMBOLS if symbols is None else config.require_canonical_symbols(symbols)
     started = datetime.now(timezone.utc)
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
     for required in (DATA_ROOT, RAW_ROOT):
@@ -835,7 +841,7 @@ def run() -> int:
     log.info("schema_version %s compression %s/%s", SCHEMA_VERSION, PARQUET_COMPRESSION, PARQUET_COMPRESSION_LEVEL)
 
     # 1. inspect disk (do not trust the download report alone)
-    partitions, inventory = plan_from_disk(RAW_ROOT, SYMBOLS, RANGE_START_UTC, RANGE_END_UTC)
+    partitions, inventory = plan_from_disk(RAW_ROOT, selected, RANGE_START_UTC, RANGE_END_UTC)
     log.info("raw inventory: %s", {k: inventory[k] for k in (
         "zip_files_on_disk", "checksum_files_on_disk", "monthly_zip_on_disk", "daily_zip_on_disk",
         "planned_zip_count", "partition_count", "interval_directories")})
@@ -853,15 +859,16 @@ def run() -> int:
         log.error("BLOCKER: unexpected raw inventory (zips=%s intervals=%s)",
                   inventory["zip_files_on_disk"], inventory["interval_directories"])
         return 2
-    if len(partitions) != EXPECTED_PARTITION_COUNT:
-        log.error("BLOCKER: planned %d partitions, expected %d", len(partitions), EXPECTED_PARTITION_COUNT)
+    expected_partitions = 34 * len(selected)
+    if len(partitions) != expected_partitions:
+        log.error("BLOCKER: planned %d partitions, expected %d", len(partitions), expected_partitions)
         return 2
 
     already = sum(1 for p in partitions if p.hive_path.exists())
     for line in (
         "=" * 100,
         "Canonical Parquet build from verified Binance USD-M PERPETUAL 1m raw ZIPs -- NOT Spot, NOT a downloader",
-        f"Symbols ({len(SYMBOLS)}): {', '.join(SYMBOLS)}",
+        f"Symbols ({len(selected)}): {', '.join(selected)}",
         f"Interval: {INTERVAL} only | schema {SCHEMA_VERSION} | pyarrow {pa.__version__}",
         f"UTC range: {RANGE_START_UTC.strftime('%Y-%m-%dT%H:%M:%SZ')} through {RANGE_END_UTC.strftime('%Y-%m-%dT%H:%M:%SZ')} inclusive",
         f"Raw (read-only): {RAW_ROOT}",
@@ -911,7 +918,7 @@ def run() -> int:
         except OSError as exc:
             log.warning("could not remove %s: %s", p, exc)
 
-    eq = overall_equivalence(records)
+    eq = overall_equivalence(records, EXPECTED_ROWS_PER_SYMBOL * len(selected))
     inv = processed_inventory()
     now = datetime.now(timezone.utc)
     report = {
@@ -940,7 +947,7 @@ def run() -> int:
         "data_root": str(DATA_ROOT),
         "raw_root": str(RAW_ROOT),
         "processed_root": str(PROCESSED_ROOT),
-        "requested_symbols": list(SYMBOLS),
+        "requested_symbols": list(selected),
         "raw_inventory": inventory,
         "raw_immutability": immut,
         "equivalence": eq,
@@ -961,7 +968,7 @@ def run() -> int:
     log.info("run summary: equivalent=%s rows=%d expected=%d failed=%d parquet_files=%d raw_unchanged=%s",
              eq["all_partitions_equivalent_to_raw"], eq["total_parquet_rows"], eq["expected_total_rows"],
              eq["failed_partitions"], inv["parquet_files"], immut["unchanged"])
-    for sym in SYMBOLS:
+    for sym in selected:
         s = eq["per_symbol"].get(sym, {})
         log.info("%-9s rows=%s partitions=%s/%s equivalent missing=%s dup=%s ohlc=%s %s..%s",
                  sym, s.get("row_count"), s.get("equivalent_partitions"), s.get("partitions"),
@@ -984,29 +991,53 @@ def run() -> int:
     return exit_code
 
 
-def validate_published() -> dict:
+def validate_published(symbols: tuple[str, ...] | None = None) -> dict:
     """Read published canonical 1m partitions. Does not write or replace Parquet."""
     from processing.timeframes.sibling_scope import directory_scope, new_defect_tally
 
     derived_parent = DATA_ROOT / "derived" / "binance" / "futures" / "um" / "perpetual"
     scope = directory_scope(derived_parent)
-    files = sorted(p for p in PROCESSED_ROOT.rglob("data.parquet") if p.is_file() and "quarantine" not in p.parts)
+    selected = SYMBOLS if symbols is None else config.require_canonical_symbols(symbols)
+    files = []
+    for path in sorted(p for p in PROCESSED_ROOT.rglob("data.parquet") if p.is_file() and "quarantine" not in p.parts):
+        hive_symbol = path.parent.parent.parent.name.split("=", 1)[-1]
+        if hive_symbol in selected:
+            files.append(path)
     defects = new_defect_tally()
-    rows_by = {symbol: 0 for symbol in SYMBOLS}
-    files_by = {symbol: 0 for symbol in SYMBOLS}
+    rows_by = {symbol: 0 for symbol in selected}
+    files_by = {symbol: 0 for symbol in selected}
+    year_rows = {symbol: {2024: 0, 2025: 0, 2026: 0} for symbol in selected}
+    october_rows = {symbol: 0 for symbol in selected}
     first_ms: dict[str, int] = {}
     last_ms: dict[str, int] = {}
     last_close_ms: dict[str, int] = {}
     schema_failures = 0
     compression_failures = 0
+    precision_failures = 0
+    fingerprint_mismatches = 0
+    cross_symbol_mismatches = 0
+    negative_price_count = 0
+    partition_bound_mismatches = 0
+    rows_by_path: dict[Path, int] = {}
+    fingerprint_parts: dict[str, list[tuple[int, int, str]]] = {symbol: [] for symbol in selected}
     zero = pa.scalar(0, type=pa.int64())
     dec_zero = pa.scalar(Decimal(0), type=DECIMAL_TYPE)
     minute = pa.scalar(60_000, type=pa.int64())
     range_start = pa.scalar(ms_of(RANGE_START_UTC), type=pa.int64())
     range_end = pa.scalar(ms_of(RANGE_END_UTC), type=pa.int64())
+    price_names = ("open", "high", "low", "close")
     for path in files:
         pf = pq.ParquetFile(path)
-        if list(pf.schema_arrow.names) != list(CANONICAL_SCHEMA.names):
+        arrow_schema = pf.schema_arrow
+        if list(arrow_schema.names) != list(CANONICAL_SCHEMA.names):
+            schema_failures += 1
+        if "open" in arrow_schema.names and arrow_schema.field("open").type != DECIMAL_TYPE:
+            precision_failures += 1
+        file_meta = arrow_schema.metadata or {}
+        stored_version = file_meta.get(b"schema_version", b"").decode("utf-8", "replace")
+        stored_symbol = file_meta.get(b"symbol", b"").decode("utf-8", "replace")
+        stored_fingerprint = file_meta.get(b"raw_payload_sha256", b"").decode("ascii", "replace")
+        if stored_version != SCHEMA_VERSION:
             schema_failures += 1
         if pf.metadata.num_row_groups:
             compression = str(pf.metadata.row_group(0).column(0).compression)
@@ -1014,13 +1045,25 @@ def validate_published() -> dict:
                 compression_failures += 1
         table = pf.read()
         n = table.num_rows
+        hive_symbol = path.parent.parent.parent.name.split("=", 1)[-1]
         symbol_values = table.column("symbol").to_pylist()
-        if len(set(symbol_values)) != 1 or symbol_values[0] not in rows_by:
+        unique_symbols = set(symbol_values)
+        if len(unique_symbols) != 1 or symbol_values[0] not in rows_by or symbol_values[0] != hive_symbol:
+            cross_symbol_mismatches += 1
             schema_failures += 1
             continue
         symbol = str(symbol_values[0])
+        if stored_symbol != symbol:
+            cross_symbol_mismatches += 1
         rows_by[symbol] += n
         files_by[symbol] += 1
+        rows_by_path[path.resolve()] = n
+        year = int(path.parent.parent.name.split("=", 1)[-1])
+        month = int(path.parent.name.split("=", 1)[-1])
+        payload_hash = table_payload_sha256(symbol, table)
+        if not stored_fingerprint or stored_fingerprint != payload_hash:
+            fingerprint_mismatches += 1
+        fingerprint_parts[symbol].append((year, month, payload_hash))
         open_ms = pc.cast(table.column("open_time"), pa.int64())
         close_ms = pc.cast(table.column("close_time"), pa.int64())
         for column_name in CANONICAL_SCHEMA.names:
@@ -1029,6 +1072,15 @@ def validate_published() -> dict:
             first_ms[symbol] = min(first_ms.get(symbol, 10**18), int(pc.min(open_ms).as_py()))
             last_ms[symbol] = max(last_ms.get(symbol, 0), int(pc.max(open_ms).as_py()))
             last_close_ms[symbol] = max(last_close_ms.get(symbol, 0), int(pc.max(close_ms).as_py()))
+            month_first, month_last = month_bounds_ms(year, month)
+            part_start = max(month_first, ms_of(RANGE_START_UTC))
+            part_end = min(month_last, ms_of(RANGE_END_UTC))
+            if int(pc.min(open_ms).as_py()) != part_start or int(pc.max(open_ms).as_py()) != part_end:
+                partition_bound_mismatches += 1
+            if year in year_rows[symbol]:
+                year_rows[symbol][year] += n
+            if year == 2026 and month == 10:
+                october_rows[symbol] += n
         if n >= 2:
             diffs = pc.subtract(open_ms.slice(1), open_ms.slice(0, n - 1))
             defects["duplicate_bucket_count"] += int(pc.sum(pc.cast(pc.equal(diffs, zero), pa.int64())).as_py() or 0)
@@ -1044,6 +1096,10 @@ def validate_published() -> dict:
             pc.or_(pc.greater(low, open_px), pc.or_(pc.greater(low, close_px), pc.less(high, low))),
         )
         defects["ohlc_violation_count"] += int(pc.sum(pc.cast(ohlc_bad, pa.int64())).as_py() or 0)
+        for price_name in price_names:
+            negative_price_count += int(
+                pc.sum(pc.cast(pc.less(table.column(price_name), dec_zero), pa.int64())).as_py() or 0
+            )
         for volume_name in ("volume", "quote_volume", "taker_buy_volume", "taker_buy_quote_volume"):
             defects["negative_volume_count"] += int(
                 pc.sum(pc.cast(pc.less(table.column(volume_name), dec_zero), pa.int64())).as_py() or 0
@@ -1063,45 +1119,110 @@ def validate_published() -> dict:
         stamp = EPOCH + timedelta(milliseconds=int(ms))
         return stamp.strftime("%Y-%m-%dT%H:%M:%S.") + f"{stamp.microsecond // 1000:03d}Z"
 
+    expected_files = EXPECTED_PARTITION_COUNT if symbols is None else 34 * len(selected)
+    expected_rows = EXPECTED_ROWS_TOTAL if symbols is None else EXPECTED_ROWS_PER_SYMBOL * len(selected)
+    expected_year_rows = {2024: 527_040, 2025: 525_600, 2026: 432_000}
+    planned, plan_inventory = plan_from_disk(RAW_ROOT, tuple(selected), RANGE_START_UTC, RANGE_END_UTC)
+    partition_row_mismatches = 0
+    for partition in planned:
+        observed = rows_by_path.get(partition.hive_path.resolve())
+        if observed != partition.expected_minutes:
+            partition_row_mismatches += 1
+    content_fingerprints = {}
+    for symbol in selected:
+        digest = hashlib.sha256()
+        for _year, _month, payload_hash in sorted(fingerprint_parts[symbol]):
+            digest.update(payload_hash.encode("ascii"))
+        content_fingerprints[symbol] = digest.hexdigest()
+    source_reconciliation = {
+        "planned_archives": plan_inventory["planned_zip_count"],
+        "planned_partitions": plan_inventory["partition_count"],
+        "missing_required_files": plan_inventory["missing_required_files"],
+        "partition_row_mismatches": partition_row_mismatches,
+        "fingerprint_mismatches": fingerprint_mismatches,
+        "partition_bound_mismatches": partition_bound_mismatches,
+        "reconciled": (
+            plan_inventory["planned_zip_count"] == 60 * len(selected)
+            and plan_inventory["partition_count"] == 34 * len(selected)
+            and not plan_inventory["missing_required_files"]
+            and partition_row_mismatches == 0
+            and partition_bound_mismatches == 0
+            and fingerprint_mismatches == 0
+        ),
+    }
     counts_ok = (
-        len(files) == EXPECTED_PARTITION_COUNT
-        and total == EXPECTED_ROWS_TOTAL
-        and all(rows_by[s] == EXPECTED_ROWS_PER_SYMBOL for s in SYMBOLS)
-        and all(files_by[s] == 34 for s in SYMBOLS)
+        len(files) == expected_files
+        and total == expected_rows
+        and all(rows_by[s] == EXPECTED_ROWS_PER_SYMBOL for s in selected)
+        and all(files_by[s] == 34 for s in selected)
+        and all(year_rows[s] == expected_year_rows for s in selected)
+        and all(october_rows[s] == 38_880 for s in selected)
         and schema_failures == 0
         and compression_failures == 0
-        and all(iso_of_ms(first_ms.get(s)) == "2024-01-01T00:00:00Z" for s in SYMBOLS)
-        and all(iso_of_ms(last_ms.get(s)) == expected_last_open for s in SYMBOLS)
-        and all(last_close_ms.get(s) == expected_last_close_ms for s in SYMBOLS)
+        and precision_failures == 0
+        and fingerprint_mismatches == 0
+        and cross_symbol_mismatches == 0
+        and negative_price_count == 0
+        and source_reconciliation["reconciled"]
+        and all(iso_of_ms(first_ms.get(s)) == "2024-01-01T00:00:00Z" for s in selected)
+        and all(iso_of_ms(last_ms.get(s)) == expected_last_open for s in selected)
+        and all(last_close_ms.get(s) == expected_last_close_ms for s in selected)
         and scope["no_other_timeframes"]
         and all(value == 0 for value in defects.values())
     )
     return {
         "parquet_files": len(files),
+        "partitions_by_symbol": files_by,
         "part_files": 0,
         "rows_by_symbol": rows_by,
         "total_rows": total,
-        "first_open_time_utc": {s: iso_of_ms(first_ms.get(s)) for s in SYMBOLS},
-        "last_open_time_utc": {s: iso_of_ms(last_ms.get(s)) for s in SYMBOLS},
-        "last_close_time_utc": {s: _iso_close(last_close_ms.get(s)) for s in SYMBOLS},
+        "symbols": list(selected),
+        "year_rows": year_rows,
+        "october_2026_rows": october_rows,
+        "first_open_time_utc": {s: iso_of_ms(first_ms.get(s)) for s in selected},
+        "last_open_time_utc": {s: iso_of_ms(last_ms.get(s)) for s in selected},
+        "last_close_time_utc": {s: _iso_close(last_close_ms.get(s)) for s in selected},
+        "content_fingerprints": content_fingerprints,
+        "source_reconciliation": source_reconciliation,
+        "schema_identity": SCHEMA_VERSION,
+        "precision": f"decimal128({DECIMAL_PRECISION},{DECIMAL_SCALE})",
+        "compression": PARQUET_COMPRESSION,
         "all_counts_expected": counts_ok,
         "approved_timeframes_present": scope["approved_timeframes_present"],
         "unauthorized_timeframes_present": scope["unauthorized_timeframes_present"],
         "other_timeframes_present": scope["other_timeframes_present"],
         "no_other_timeframes": scope["no_other_timeframes"],
         "defects": defects,
+        "negative_price_count": negative_price_count,
+        "cross_symbol_mismatches": cross_symbol_mismatches,
         "schema_failures": schema_failures,
+        "precision_failures": precision_failures,
         "compression_failures": compression_failures,
+        "fingerprint_mismatches": fingerprint_mismatches,
     }
 
 
 def main() -> int:
+    if "--validate-new-symbols" in sys.argv:
+        scan = validate_published(NEW_SYMBOLS)
+        print(json.dumps({k: scan[k] for k in (
+            "symbols", "partitions_by_symbol", "rows_by_symbol", "year_rows", "october_2026_rows",
+            "first_open_time_utc", "last_open_time_utc", "last_close_time_utc",
+            "content_fingerprints", "source_reconciliation",
+            "schema_identity", "precision", "compression",
+            "all_counts_expected", "defects", "negative_price_count", "cross_symbol_mismatches",
+            "schema_failures", "precision_failures", "compression_failures", "fingerprint_mismatches",
+            "parquet_files", "total_rows",
+        )}, indent=2))
+        return 0 if scan["all_counts_expected"] else 1
     if "--validate-only" in sys.argv:
         project_root = Path(__file__).resolve().parents[2]
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
         from processing.timeframes.validate_published import validate_timeframe
         return validate_timeframe("1m")
+    if "--publish-new-symbols" in sys.argv:
+        return run(NEW_SYMBOLS)
     return run()
 
 

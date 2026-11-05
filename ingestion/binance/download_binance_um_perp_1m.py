@@ -15,9 +15,9 @@ Scope -- audit these facts here and in the CONFIGURATION block below:
   * Archive selection : one official monthly archive per complete month; official daily archives
                         only for the partial month (2026-10-01 .. 2026-10-27) or when a monthly archive
                         is legitimately unavailable (HTTP 404 for a month at/after the listing date).
-  * Incremental runs  : moving RANGE_END_UTC forward extends the dataset in place -- archives already on
-                        disk are re-verified and skipped, only the new periods are downloaded, and the
-                        report carries the previous run summaries forward (``previous_runs``).
+  * Incremental runs  : a same-scope run whose previous report ends strictly before the current plan
+                        records that time extension. A new-symbols-only run and a read-only report do
+                        not inherit ``incremental_extension`` or ``previous_runs`` from an older file.
   * Preservation      : downloaded ZIP bytes and the official ``.CHECKSUM`` sidecar are stored
                         unchanged; nothing is extracted, rewritten, normalised or converted.
                         Gaps / anomalies inside an authentic archive are REPORTED, never repaired.
@@ -54,6 +54,12 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+import config
+
 # =============================================================================
 # CONFIGURATION -- the only place that defines WHAT is downloaded.
 # =============================================================================
@@ -63,10 +69,9 @@ from typing import Optional
 DATA_ROOT: Path = Path(os.environ.get("DATA_ROOT") or r"C:\MarketData").expanduser()
 
 # Binance USD-M (USDT-margined) PERPETUAL contracts. Exact symbols -- nothing is substituted.
-SYMBOLS: tuple[str, ...] = (
-    "BTCUSDT", "ETHUSDT", "AVAXUSDT", "AAVEUSDT", "NEARUSDT",
-    "LINKUSDT", "LTCUSDT", "OPUSDT", "DOTUSDT",
-)
+# The original nine remain. The four additions are canonical 1m only.
+SYMBOLS: tuple[str, ...] = config.CANONICAL_1M_SYMBOLS
+NEW_SYMBOLS: tuple[str, ...] = config.NEW_CANONICAL_1M_SYMBOLS
 INTERVAL = "1m"  # the ONLY kline interval this script will ever request
 
 # Fixed inclusive UTC range of required candle OPEN times (must cover complete UTC days).
@@ -118,6 +123,17 @@ STATUS_DEFINITIONS = {
 }
 
 log = logging.getLogger("binance_um_1m")
+
+REPORT_SCHEMA_VERSION = 2
+MODE_INCREMENTAL = "INCREMENTAL_EXTENSION"
+MODE_NEW_SYMBOLS = "NEW_SYMBOLS_ONLY"
+MODE_READ_ONLY = "READ_ONLY_VALIDATION"
+COVERAGE_START_UTC = "2024-01-01T00:00:00Z"
+COVERAGE_LAST_OPEN_UTC = "2026-10-27T23:59:00Z"
+COVERAGE_LAST_CLOSE_UTC = "2026-10-27T23:59:59.999Z"
+COVERAGE_END_EXCLUSIVE_UTC = "2026-10-28T00:00:00Z"
+STALE_COVERAGE_BOUNDARY = "2026-10-28T23:59:00Z"
+HISTORICAL_DOWNLOAD_RUN_ID = "20261101T165204Z"
 
 
 # ----------------------------------------------------------------------------- time helpers
@@ -811,9 +827,104 @@ def find_superseded_daily(root: Path, symbol: str, verified_monthly_periods: set
             if p.stem[len(prefix):][:7] in verified_monthly_periods]
 
 
+def iso_close_of_open_ms(open_ms: int) -> str:
+    stamp = EPOCH + timedelta(milliseconds=open_ms + MINUTE_MS - 1)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%S.") + f"{stamp.microsecond // 1000:03d}Z"
+
+
+def coverage_fields(range_start_ms: int, range_end_ms: int) -> dict:
+    """Fresh coverage object. Timestamps come from the range passed by the caller."""
+    return {
+        "coverage_start_utc": iso_of_ms(range_start_ms),
+        "coverage_last_open_utc": iso_of_ms(range_end_ms),
+        "coverage_last_close_utc": iso_close_of_open_ms(range_end_ms),
+        "coverage_end_exclusive_utc": iso_of_ms(range_end_ms + MINUTE_MS),
+    }
+
+
+def non_applicable_extension(reason: str) -> dict:
+    return {"applicable": False, "reason": reason, "new_periods": []}
+
+
+def contains_stale_boundary(value) -> bool:
+    if isinstance(value, str):
+        return STALE_COVERAGE_BOUNDARY in value
+    if isinstance(value, dict):
+        return any(contains_stale_boundary(key) or contains_stale_boundary(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(contains_stale_boundary(item) for item in value)
+    return False
+
+
+def same_symbol_scope(previous: Optional[dict], symbols: tuple[str, ...]) -> bool:
+    if not isinstance(previous, dict) or previous.get("report_mode") == MODE_READ_ONLY:
+        return False
+    return list(previous.get("requested_symbols") or []) == list(symbols)
+
+
+def build_incremental_extension(previous: Optional[dict], planned: list[Archive], results: list[tuple[Archive, dict]],
+                                range_end_ms: int, symbols: tuple[str, ...]) -> tuple[dict, list]:
+    """Allocate a new extension block. A previous document is never used as the report template."""
+    if previous is None:
+        return non_applicable_extension("NO_PREVIOUS_REPORT"), []
+    if not same_symbol_scope(previous, symbols):
+        return non_applicable_extension("SYMBOL_SCOPE_CHANGED"), []
+    prev_end = previous_range_end_ms(previous)
+    if prev_end is None or prev_end >= range_end_ms:
+        return non_applicable_extension("PREVIOUS_RANGE_IS_NOT_A_STRICT_PREFIX"), []
+    new_planned = [archive for archive in planned if archive.start_ms > prev_end]
+    new_results = [(archive, rec) for archive, rec in results if archive.start_ms > prev_end]
+    ok_statuses = ("verified", "skipped-as-already-verified")
+    extension = {
+        "applicable": True,
+        "previous_report_run_id": previous.get("run_id"),
+        "coverage_last_open_utc": iso_of_ms(range_end_ms),
+        "new_periods": sorted({archive.period for archive in new_planned}),
+        "expected_new_archives": len(new_planned),
+        "new_archives_by_type": {
+            "monthly": sum(archive.kind == "monthly" for archive in new_planned),
+            "daily": sum(archive.kind == "daily" for archive in new_planned),
+        },
+        "new_archives_by_status": dict(sorted(Counter(rec["status"] for _, rec in new_results).items())),
+        "new_row_count": sum(rec["row_count"] for _, rec in new_results if rec["status"] in ok_statuses),
+        "new_archives": [{"zip": archive.zip_name, "status": rec["status"]} for archive, rec in new_results],
+    }
+    previous_runs = [{
+        "label": "historical_download",
+        "run_id": previous.get("run_id"),
+        "run_started_utc": previous.get("run_started_utc"),
+        "generated_at_utc": previous.get("generated_at_utc"),
+    }]
+    return extension, previous_runs
+
+
+def historical_runs_from_previous(previous: Optional[dict]) -> list[dict]:
+    """Copy only the labelled historical download fact. Never copy incremental_extension."""
+    if not isinstance(previous, dict):
+        return []
+    if previous.get("report_mode") == MODE_READ_ONLY and isinstance(previous.get("historical_runs"), list):
+        return [dict(item) for item in previous["historical_runs"] if isinstance(item, dict)]
+    if previous.get("run_id") != HISTORICAL_DOWNLOAD_RUN_ID:
+        return []
+    summary = previous.get("run_summary") if isinstance(previous.get("run_summary"), dict) else {}
+    return [{
+        "label": "historical_download",
+        "run_id": HISTORICAL_DOWNLOAD_RUN_ID,
+        "verified": int(summary.get("verified", 0)),
+        "skipped": int(summary.get("skipped-as-already-verified", summary.get("skipped", 0))),
+        "unavailable": int(summary.get("unavailable", 0)),
+        "failed": int(summary.get("failed", 0)),
+        "quarantined": int(summary.get("quarantined", 0)),
+        "coverage_start_utc": COVERAGE_START_UTC,
+        "coverage_last_open_utc": COVERAGE_LAST_OPEN_UTC,
+        "coverage_last_close_utc": COVERAGE_LAST_CLOSE_UTC,
+        "coverage_end_exclusive_utc": COVERAGE_END_EXCLUSIVE_UTC,
+    }]
+
+
 def build_report(job: Job, started: datetime, symbols: tuple[str, ...], validation: dict,
                  planned: list[Archive], results: list[tuple[Archive, dict]], fallback_added: int, interrupted: bool,
-                 previous: Optional[dict] = None) -> dict:
+                 previous: Optional[dict] = None, report_mode: str = MODE_INCREMENTAL) -> dict:
     order = {s: i for i, s in enumerate(symbols)}
     results = sorted(results, key=lambda ar: (order.get(ar[0].symbol, 999), ar[0].kind != "monthly", ar[0].period))
     recs = [rec for _, rec in results]
@@ -873,32 +984,38 @@ def build_report(job: Job, started: datetime, symbols: tuple[str, ...], validati
         "all_symbols_coverage_complete": bool(valid_cov) and all(c["coverage_complete"] for c in coverage.values()),
     }
 
-    # Incremental extension relative to the previous report: archives lying entirely after its range end.
-    extension = None
-    previous_runs: list = []
-    if previous is not None:
-        previous_runs = list(previous.get("previous_runs") or [])
-        previous_runs.append({k: previous.get(k) for k in ("run_id", "run_started_utc", "generated_at_utc", "duration_seconds",
-                                                           "interrupted", "required_range_utc", "plan_summary", "run_summary")})
-        prev_end = previous_range_end_ms(previous)
-        if prev_end is not None:
-            new_planned = [a for a in planned if a.start_ms > prev_end]
-            new_results = [(a, r) for a, r in results if a.start_ms > prev_end]
-            extension = {
-                "previous_report_run_id": previous.get("run_id"),
-                "previous_last_open_time_utc": iso_of_ms(prev_end),
-                "new_last_open_time_utc": iso_of_ms(job.range_end_ms),
-                "new_periods_utc": sorted({a.period for a in new_planned}),
-                "expected_new_archives": len(new_planned),
-                "new_archives_by_type": {"monthly": sum(a.kind == "monthly" for a in new_planned),
-                                         "daily": sum(a.kind == "daily" for a in new_planned)},
-                "new_archives_by_status": dict(sorted(Counter(r["status"] for _, r in new_results).items())),
-                "new_row_count": sum(r["row_count"] for _, r in new_results if r["status"] in ok_statuses),
-                "new_archives": [{"zip": a.zip_name, "status": r["status"]} for a, r in new_results],
-            }
+    if report_mode == MODE_NEW_SYMBOLS:
+        extension, previous_runs = non_applicable_extension("NEW_SYMBOLS_ONLY"), []
+    else:
+        extension, previous_runs = build_incremental_extension(
+            previous, planned, results, job.range_end_ms, symbols
+        )
+    target = coverage_fields(job.range_start_ms, job.range_end_ms)
+    current_run = {
+        "downloaded": totals.get("verified", 0),
+        "skipped": totals.get("skipped-as-already-verified", 0),
+        "failed": totals.get("failed", 0),
+        "unavailable": totals.get("unavailable", 0),
+        "quarantined": totals.get("quarantined", 0),
+    }
+    warnings: list[str] = ["interrupted"] if interrupted else []
+    validation_status = "passed" if dataset_summary["all_symbols_coverage_complete"] and not interrupted and not current_run["failed"] and not current_run["quarantined"] else "failed"
+    if report_mode == MODE_NEW_SYMBOLS and current_run["unavailable"]:
+        validation_status = "failed"
 
     return {
-        "report_version": 1,
+        "report_version": REPORT_SCHEMA_VERSION,
+        "report_schema_version": REPORT_SCHEMA_VERSION,
+        "report_mode": report_mode,
+        **target,
+        "target_coverage": dict(target),
+        "symbol_scope": list(symbols),
+        "current_run": dict(current_run),
+        "current_run_downloaded": current_run["downloaded"],
+        "current_run_skipped": current_run["skipped"],
+        "current_run_failed": current_run["failed"],
+        "validation_status": validation_status,
+        "warnings": warnings,
         "generated_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "run_id": job.run_id,
         "run_started_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -927,6 +1044,12 @@ def build_report(job: Job, started: datetime, symbols: tuple[str, ...], validati
             "daily_fallback_archives_added": fallback_added,
             "archives_processed": len(recs),
         },
+        "source_archive_plan": {
+            "monthly_archives": sum(archive.kind == "monthly" for archive in planned),
+            "daily_archives": sum(archive.kind == "daily" for archive in planned),
+            "archives_consumed": len(planned),
+            "october_monthly_archives": sum(archive.kind == "monthly" and archive.period == "2026-10" for archive in planned),
+        },
         "run_summary": dict(sorted(totals.items())),
         "incremental_extension": extension,
         "previous_runs": previous_runs,
@@ -940,12 +1063,71 @@ def build_report(job: Job, started: datetime, symbols: tuple[str, ...], validati
     }
 
 
+def validate_report_document(report: dict) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(report, dict):
+        return ["report is not an object"]
+    required = (
+        "report_schema_version", "report_mode", "run_id", "generated_at_utc",
+        "coverage_start_utc", "coverage_last_open_utc", "coverage_last_close_utc",
+        "coverage_end_exclusive_utc", "symbol_scope", "incremental_extension",
+        "validation_status", "warnings",
+    )
+    errors.extend(f"missing {key}" for key in required if key not in report)
+    if report.get("coverage_start_utc") != COVERAGE_START_UTC:
+        errors.append("coverage start is not 2024-01-01T00:00:00Z")
+    if report.get("coverage_last_open_utc") != COVERAGE_LAST_OPEN_UTC:
+        errors.append("last open is not 2026-10-27T23:59:00Z")
+    if report.get("coverage_last_close_utc") != COVERAGE_LAST_CLOSE_UTC:
+        errors.append("last close is not 2026-10-27T23:59:59.999Z")
+    if report.get("coverage_end_exclusive_utc") != COVERAGE_END_EXCLUSIVE_UTC:
+        errors.append("exclusive end is not 2026-10-28T00:00:00Z")
+    extension = report.get("incremental_extension")
+    if not isinstance(extension, dict) or "applicable" not in extension:
+        errors.append("incremental_extension is not an explicit object")
+    elif extension.get("applicable") is False:
+        banned = [key for key in ("previous_last_open_time_utc", "new_last_open_time_utc", "coverage_last_open_utc", "coverage_end_exclusive_utc", "coverage_start_utc") if key in extension]
+        errors.extend(f"non-applicable extension contains {key}" for key in banned)
+        if extension.get("new_periods") != []:
+            errors.append("non-applicable extension contains periods")
+    if report.get("report_mode") == MODE_NEW_SYMBOLS:
+        if not isinstance(extension, dict) or extension.get("applicable") is not False or extension.get("reason") != "NEW_SYMBOLS_ONLY":
+            errors.append("new-symbols report does not mark incremental extension non-applicable")
+        if list(report.get("symbol_scope") or []) != list(NEW_SYMBOLS):
+            errors.append("new-symbols scope is not the four approved symbols")
+    if report.get("report_mode") == MODE_READ_ONLY:
+        if report.get("current_run_downloaded") != 0 or report.get("current_run_skipped") != 0 or report.get("current_run_failed") != 0:
+            errors.append("read-only report mixes download activity into current-run counters")
+        if list(report.get("symbol_scope") or []) != list(NEW_SYMBOLS):
+            errors.append("read-only scope is not the four approved symbols")
+    if contains_stale_boundary(report):
+        errors.append("stale coverage boundary 2026-10-28T23:59:00Z is present")
+    return errors
+
+
 def write_report(path: Path, report: dict) -> None:
+    """Publish a newly built report. The destination is replaced only after the temp file re-parses."""
+    errors = validate_report_document(report)
+    if errors:
+        raise ValueError("refusing to publish report: " + "; ".join(errors))
+    path.parent.mkdir(parents=True, exist_ok=True)
     part = path.with_name(path.name + ".part")
-    with open(part, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, indent=2)
-        fh.write("\n")
-    os.replace(part, path)
+    try:
+        with open(part, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2)
+            fh.write("\n")
+        with open(part, encoding="utf-8") as fh:
+            reloaded = json.load(fh)
+        reloaded_errors = validate_report_document(reloaded)
+        if reloaded_errors:
+            raise ValueError("temporary report failed validation: " + "; ".join(reloaded_errors))
+        os.replace(part, path)
+    except Exception:
+        if part.exists():
+            part.unlink()
+        raise
+    if part.exists():
+        part.unlink()
 
 
 # ----------------------------------------------------------------------------- orchestration
@@ -973,17 +1155,19 @@ def run_pool(job: Job, archives: list[Archive], results: list) -> None:
             raise
 
 
-def run(root: Path, symbols: tuple[str, ...], range_start: datetime, range_end: datetime) -> int:
+def run(root: Path, symbols: tuple[str, ...], range_start: datetime, range_end: datetime,
+        allow_monthly_fallback: bool = True, report_mode: str = MODE_INCREMENTAL) -> int:
+    symbols = config.require_canonical_symbols(symbols)
     started = datetime.now(timezone.utc)
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
     root = root.resolve()
     for sub in ("logs", "reports", "quarantine", "raw"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     setup_logging(root / "logs" / "download.log")
-    log.info("run %s started -- data root %s", run_id, root)
+    log.info("run %s started -- data root %s mode %s", run_id, root, report_mode)
     report_path = root / "reports" / "download_report.json"
-    previous = load_previous_report(report_path)
-    prev_end_ms = previous_range_end_ms(previous)
+    previous = load_previous_report(report_path) if report_mode == MODE_INCREMENTAL else None
+    prev_end_ms = previous_range_end_ms(previous) if previous else None
 
     if not (range_start.tzinfo and range_end.tzinfo and range_start <= range_end
             and (range_start.hour, range_start.minute) == (0, 0) and (range_end.hour, range_end.minute) == (23, 59)):
@@ -1030,7 +1214,7 @@ def run(root: Path, symbols: tuple[str, ...], range_start: datetime, range_end: 
         f"Already on disk (re-verified, not re-downloaded): {len(already_present)}",
         f"Source: {ARCHIVE_BASE_URL}/{{monthly|daily}}/klines/{{SYMBOL}}/{INTERVAL}/ ; concurrency={MAX_WORKERS}",
     ]
-    if prev_end_ms is not None:
+    if report_mode == MODE_INCREMENTAL and prev_end_ms is not None and prev_end_ms < ms_of(range_end):
         new_planned = [a for a in planned if a.start_ms > prev_end_ms]
         new_periods = sorted({a.period for a in new_planned})
         lines += [
@@ -1066,7 +1250,7 @@ def run(root: Path, symbols: tuple[str, ...], range_start: datetime, range_end: 
         run_pool(job, monthly, results)
         for archive, rec in list(results):
             onboard = onboard_ms.get(archive.symbol)
-            if rec["status"] == "unavailable" and not (onboard is not None and archive.end_ms < onboard):
+            if allow_monthly_fallback and rec["status"] == "unavailable" and not (onboard is not None and archive.end_ms < onboard):
                 y, m = (int(x) for x in archive.period.split("-"))
                 days_ = daily_archives_for_month(archive.symbol, y, m, job.range_start_ms, job.range_end_ms,
                                                  fallback_for=archive.period, not_before_ms=onboard)
@@ -1077,7 +1261,7 @@ def run(root: Path, symbols: tuple[str, ...], range_start: datetime, range_end: 
     except KeyboardInterrupt:
         interrupted = True
     finally:
-        report = build_report(job, started, symbols, validation, planned, results, len(fallback), interrupted, previous)
+        report = build_report(job, started, symbols, validation, planned, results, len(fallback), interrupted, previous, report_mode)
         write_report(report_path, report)
 
     # 6. final summary
@@ -1093,9 +1277,11 @@ def run(root: Path, symbols: tuple[str, ...], range_start: datetime, range_end: 
                  c["missing_minute_count"], c["duplicate_minute_count_total"], c["ohlc_violation_count_total"],
                  c["unavailable_periods"], c["failed_periods"], c["quarantined_periods"])
     ext, ds, inv = report["incremental_extension"], report["dataset_summary"], report["on_disk_inventory"]
-    if ext is not None:
-        log.info("extension: %s -> %s, %d new archives expected, statuses=%s, new rows=%d", ext["previous_last_open_time_utc"],
-                 ext["new_last_open_time_utc"], ext["expected_new_archives"], ext["new_archives_by_status"], ext["new_row_count"])
+    if ext.get("applicable"):
+        log.info("extension applicable: current last open %s, %d new archives expected, statuses=%s, new rows=%d",
+                 ext["coverage_last_open_utc"], ext["expected_new_archives"], ext["new_archives_by_status"], ext["new_row_count"])
+    else:
+        log.info("incremental extension not applicable: %s", ext.get("reason"))
     log.info("dataset: %d verified archives, %d rows, %s .. %s, missing=%d dup=%d out_of_order=%d ohlc=%d",
              ds["verified_archives"], ds["total_row_count"], ds["first_open_time_utc"], ds["last_open_time_utc"],
              ds["total_missing_minute_count"], ds["total_duplicate_minute_count"], ds["total_out_of_order_count"],
@@ -1106,13 +1292,273 @@ def run(root: Path, symbols: tuple[str, ...], range_start: datetime, range_end: 
     log.info("report: %s", report_path)
     log.info("log:    %s", root / "logs" / "download.log")
     bad = sum(report["run_summary"].get(s, 0) for s in ("failed", "quarantined"))
-    exit_code = 1 if (bad or interrupted or len(valid_symbols) != len(symbols)) else 0
+    unavailable = 0 if allow_monthly_fallback else sum(report["run_summary"].get(s, 0) for s in ("unavailable",))
+    exit_code = 1 if (bad or unavailable or interrupted or len(valid_symbols) != len(symbols)) else 0
     log.info("run %s finished with exit code %d", run_id, exit_code)
     return exit_code
 
 
+def _stdout_logging() -> None:
+    fmt = logging.Formatter("%(asctime)sZ %(levelname)-7s %(message)s", "%Y-%m-%dT%H:%M:%S")
+    fmt.converter = time.gmtime
+    log.setLevel(logging.INFO)
+    log.handlers.clear()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(fmt)
+    log.addHandler(handler)
+
+
+def _parquet_inventory(processed: Path) -> dict:
+    per_symbol: dict[str, dict] = {symbol: {
+        "canonical_partitions": 0,
+        "rows": 0,
+        "year_rows": {"2024": 0, "2025": 0, "2026": 0},
+        "october_2026_rows": 0,
+    } for symbol in NEW_SYMBOLS}
+    symbols_present: set[str] = set()
+    partitions = 0
+    rows = 0
+    if not processed.exists():
+        return {"symbols": 0, "partitions": 0, "rows": 0, "symbol_names": [], "per_symbol": per_symbol}
+    import pyarrow.parquet as pq
+    for path in sorted(p for p in processed.rglob("data.parquet") if p.is_file() and "quarantine" not in p.parts):
+        hive = path.parent.parent.parent.name
+        if not hive.startswith("symbol="):
+            continue
+        symbol = hive.split("=", 1)[1]
+        year = path.parent.parent.name.split("=", 1)[-1]
+        month = path.parent.name.split("=", 1)[-1]
+        count = int(pq.ParquetFile(path).metadata.num_rows)
+        symbols_present.add(symbol)
+        partitions += 1
+        rows += count
+        if symbol in per_symbol:
+            slot = per_symbol[symbol]
+            slot["canonical_partitions"] += 1
+            slot["rows"] += count
+            if year in slot["year_rows"]:
+                slot["year_rows"][year] += count
+            if year == "2026" and month == "10":
+                slot["october_2026_rows"] += count
+    return {
+        "symbols": len(symbols_present),
+        "partitions": partitions,
+        "rows": rows,
+        "symbol_names": sorted(symbols_present),
+        "per_symbol": per_symbol,
+    }
+
+
+def _derived_symbols(root: Path) -> tuple[list[str], list[str]]:
+    derived_root = root / "derived" / "binance" / "futures" / "um" / "perpetual"
+    found: set[str] = set()
+    new_found: list[str] = []
+    if derived_root.exists():
+        for timeframe in derived_root.iterdir():
+            if not timeframe.is_dir():
+                continue
+            for child in timeframe.iterdir():
+                if child.is_dir() and child.name.startswith("symbol="):
+                    symbol = child.name.split("=", 1)[1]
+                    found.add(symbol)
+                    if symbol in NEW_SYMBOLS:
+                        new_found.append(f"{timeframe.name}/{symbol}")
+    ordered = [symbol for symbol in config.ALLOWED_SYMBOLS if symbol in found]
+    return ordered, new_found
+
+
+def collect_local_inventory(root: Path, symbols: tuple[str, ...]) -> dict:
+    """Read local archives and Parquet footers. This function does not write or open a network connection."""
+    planned = [archive for symbol in symbols for archive in plan_symbol(symbol, RANGE_START_UTC, RANGE_END_UTC)]
+    missing: list[str] = []
+    checksum_failures = 0
+    verified = 0
+    for archive in planned:
+        zip_path = archive.zip_path(root)
+        checksum_path = archive.checksum_path(root)
+        if not zip_path.is_file() or not checksum_path.is_file():
+            missing.append(archive.zip_name)
+            continue
+        try:
+            expected = parse_checksum_bytes(checksum_path.read_bytes(), archive.zip_name)
+            actual = sha256_of_file(zip_path)
+        except (OSError, ValueError):
+            checksum_failures += 1
+            continue
+        if actual == expected:
+            verified += 1
+        else:
+            checksum_failures += 1
+    full_plan = [archive for symbol in config.CANONICAL_1M_SYMBOLS for archive in plan_symbol(symbol, RANGE_START_UTC, RANGE_END_UTC)]
+    planned_paths = {archive.zip_path(root).resolve() for archive in full_plan}
+    raw_base = root / "raw" / "binance" / "futures" / "um" / "perpetual"
+    zip_files = [path for path in raw_base.rglob("*.zip") if path.is_file()] if raw_base.exists() else []
+    checksum_files = [path for path in raw_base.rglob("*.zip.CHECKSUM") if path.is_file()] if raw_base.exists() else []
+    consumed_present = sum(1 for archive in full_plan if archive.zip_path(root).is_file())
+    retained = sum(1 for path in zip_files if path.resolve() not in planned_paths)
+    canonical = _parquet_inventory(root / "processed" / "binance" / "futures" / "um" / "perpetual" / "1m")
+    derived_symbols, new_derived = _derived_symbols(root)
+    per_symbol = {}
+    for symbol in symbols:
+        symbol_plan = [archive for archive in planned if archive.symbol == symbol]
+        slot = canonical["per_symbol"].get(symbol, {})
+        per_symbol[symbol] = {
+            "archives_consumed": len(symbol_plan),
+            "monthly_archives": sum(archive.kind == "monthly" for archive in symbol_plan),
+            "daily_archives": sum(archive.kind == "daily" for archive in symbol_plan),
+            "canonical_partitions": slot.get("canonical_partitions", 0),
+            "rows": slot.get("rows", 0),
+            "year_rows": dict(slot.get("year_rows") or {"2024": 0, "2025": 0, "2026": 0}),
+            "october_2026_rows": slot.get("october_2026_rows", 0),
+        }
+    return {
+        "source_archive_plan": {
+            "monthly_archives": sum(archive.kind == "monthly" for archive in planned),
+            "daily_archives": sum(archive.kind == "daily" for archive in planned),
+            "archives_consumed": len(planned),
+            "october_monthly_archives": sum(archive.kind == "monthly" and archive.period == "2026-10" for archive in planned),
+        },
+        "per_symbol": per_symbol,
+        "raw": {
+            "zip_files": len(zip_files),
+            "checksum_files": len(checksum_files),
+            "monthly_zip_files": sum("monthly" in path.parts for path in zip_files),
+            "daily_zip_files": sum("daily" in path.parts for path in zip_files),
+            "consumed_production_plan": consumed_present,
+            "retained_historical_archives": retained,
+        },
+        "inventory_verified_archives": verified,
+        "inventory_missing_archives": len(missing),
+        "inventory_checksum_failures": checksum_failures,
+        "canonical_1m": {
+            "symbols": canonical["symbols"],
+            "partitions": canonical["partitions"],
+            "rows": canonical["rows"],
+            "symbol_names": canonical["symbol_names"],
+        },
+        "fully_derived_symbol_count": len(derived_symbols),
+        "fully_derived_symbols": derived_symbols,
+        "new_symbols_with_derived_timeframes": new_derived,
+    }
+
+
+def production_inventory_errors(inventory: dict) -> list[str]:
+    errors: list[str] = []
+    plan = inventory.get("source_archive_plan") or {}
+    raw = inventory.get("raw") or {}
+    canonical = inventory.get("canonical_1m") or {}
+    expected_plan = {"monthly_archives": 132, "daily_archives": 108, "archives_consumed": 240, "october_monthly_archives": 0}
+    for key, expected in expected_plan.items():
+        if plan.get(key) != expected:
+            errors.append(f"source plan {key}={plan.get(key)} expected {expected}")
+    expected_raw = {
+        "zip_files": 915, "checksum_files": 915, "monthly_zip_files": 429, "daily_zip_files": 486,
+        "consumed_production_plan": 780, "retained_historical_archives": 135,
+    }
+    for key, expected in expected_raw.items():
+        if raw.get(key) != expected:
+            errors.append(f"raw {key}={raw.get(key)} expected {expected}")
+    if inventory.get("inventory_verified_archives") != 240:
+        errors.append("verified archive count is not 240")
+    if inventory.get("inventory_missing_archives") != 0:
+        errors.append("missing archives remain")
+    if inventory.get("inventory_checksum_failures") != 0:
+        errors.append("checksum failures remain")
+    if canonical.get("symbols") != 13 or canonical.get("partitions") != 442 or canonical.get("rows") != 19_300_320:
+        errors.append(
+            f"canonical 1m inventory is {canonical.get('symbols')} symbols, "
+            f"{canonical.get('partitions')} partitions, {canonical.get('rows')} rows"
+        )
+    if set(canonical.get("symbol_names") or []) != set(config.CANONICAL_1M_SYMBOLS):
+        errors.append("canonical symbol set is not the 13 approved symbols")
+    year_rows = {"2024": 527_040, "2025": 525_600, "2026": 432_000}
+    for symbol in NEW_SYMBOLS:
+        slot = (inventory.get("per_symbol") or {}).get(symbol) or {}
+        if slot.get("archives_consumed") != 60 or slot.get("monthly_archives") != 33 or slot.get("daily_archives") != 27:
+            errors.append(f"{symbol} archive plan is not 33 monthly + 27 daily")
+        if slot.get("canonical_partitions") != 34 or slot.get("rows") != 1_484_640:
+            errors.append(f"{symbol} canonical inventory is not 34 partitions / 1484640 rows")
+        if slot.get("year_rows") != year_rows or slot.get("october_2026_rows") != 38_880:
+            errors.append(f"{symbol} year or October row counts do not match the target window")
+    if inventory.get("fully_derived_symbol_count") != 9 or list(inventory.get("fully_derived_symbols") or []) != list(config.ALLOWED_SYMBOLS):
+        errors.append("fully derived inventory is not the original nine symbols")
+    if inventory.get("new_symbols_with_derived_timeframes"):
+        errors.append("new symbols are present in derived timeframes")
+    return errors
+
+
+def assemble_read_only_report(inventory: dict, historical_runs: list[dict], run_id: str,
+                              generated_at: str, started: datetime) -> dict:
+    """Build a new report object. The caller's inventory and history dictionaries are not reused."""
+    detached = json.loads(json.dumps(inventory))
+    history = [dict(item) for item in historical_runs]
+    coverage = coverage_fields(ms_of(RANGE_START_UTC), ms_of(RANGE_END_UTC))
+    warnings = production_inventory_errors(detached)
+    return {
+        "report_version": REPORT_SCHEMA_VERSION,
+        "report_schema_version": REPORT_SCHEMA_VERSION,
+        "report_mode": MODE_READ_ONLY,
+        **coverage,
+        "target_coverage": dict(coverage),
+        "run_id": run_id,
+        "generated_at_utc": generated_at,
+        "run_started_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "symbol_scope": list(NEW_SYMBOLS),
+        "source_archive_plan": detached["source_archive_plan"],
+        "incremental_extension": non_applicable_extension("READ_ONLY_VALIDATION"),
+        "current_run": {"downloaded": 0, "skipped": 0, "failed": 0, "unavailable": 0, "quarantined": 0},
+        "current_run_downloaded": 0,
+        "current_run_skipped": 0,
+        "current_run_failed": 0,
+        "inventory_verified_archives": detached["inventory_verified_archives"],
+        "inventory_missing_archives": detached["inventory_missing_archives"],
+        "inventory_checksum_failures": detached["inventory_checksum_failures"],
+        "inventory": detached,
+        "historical_runs": history,
+        "previous_runs": [],
+        "canonical_1m_symbols": detached["canonical_1m"]["symbols"],
+        "canonical_1m_partitions": detached["canonical_1m"]["partitions"],
+        "canonical_1m_rows": detached["canonical_1m"]["rows"],
+        "fully_derived_symbol_count": detached["fully_derived_symbol_count"],
+        "validation_status": "passed" if not warnings else "failed",
+        "warnings": warnings,
+    }
+
+
+def report_only(root: Path, symbols: tuple[str, ...] = NEW_SYMBOLS) -> int:
+    """Regenerate download_report.json from local files. No network, no archive writes, no Parquet writes."""
+    symbols = config.require_canonical_symbols(symbols)
+    if tuple(symbols) != tuple(NEW_SYMBOLS):
+        raise ValueError("report-only publishes the four new canonical symbols")
+    _stdout_logging()
+    started = datetime.now(timezone.utc)
+    run_id = started.strftime("%Y%m%dT%H%M%SZ")
+    root = root.resolve()
+    report_path = root / "reports" / "download_report.json"
+    previous = load_previous_report(report_path)
+    report = assemble_read_only_report(
+        collect_local_inventory(root, symbols),
+        historical_runs_from_previous(previous),
+        run_id,
+        started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        started,
+    )
+    log.info("report-only %s mode %s warnings=%d", run_id, report["report_mode"], len(report["warnings"]))
+    if report["validation_status"] != "passed":
+        for warning in report["warnings"]:
+            log.error("%s", warning)
+        return 1
+    write_report(report_path, report)
+    log.info("wrote %s", report_path)
+    return 0
+
+
 def main() -> int:
-    return run(DATA_ROOT, SYMBOLS, RANGE_START_UTC, RANGE_END_UTC)
+    if "--report-only" in sys.argv:
+        return report_only(DATA_ROOT, NEW_SYMBOLS)
+    if "--new-symbols-only" in sys.argv:
+        return run(DATA_ROOT, NEW_SYMBOLS, RANGE_START_UTC, RANGE_END_UTC, allow_monthly_fallback=False, report_mode=MODE_NEW_SYMBOLS)
+    return run(DATA_ROOT, SYMBOLS, RANGE_START_UTC, RANGE_END_UTC, report_mode=MODE_INCREMENTAL)
 
 
 if __name__ == "__main__":

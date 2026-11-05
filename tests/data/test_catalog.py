@@ -25,21 +25,24 @@ class TestCatalog(unittest.TestCase):
             self.assertTrue(info.root.is_dir(), tf)
             self.assertEqual(info.actual_files, config.TIMEFRAME_SPECS[tf].expected_files, tf)
             self.assertEqual(info.expected_files, info.actual_files, tf)
-            self.assertEqual(set(info.symbols), set(config.ALLOWED_SYMBOLS), tf)
+            self.assertEqual(set(info.symbols), set(config.symbols_for_timeframe(tf)), tf)
             self.assertFalse(info.extra_files, tf)
             self.assertFalse(info.missing_partitions, tf)
             self.assertFalse(info.unexpected_symbols, tf)
 
     def test_expected_file_counts(self) -> None:
-        expected = {"1m": 306, "5m": 306, "15m": 306, "30m": 306, "1h": 306, "4h": 306, "1d": 27}
+        expected = {"1m": 442, "5m": 442, "15m": 442, "30m": 442, "1h": 442, "4h": 442, "1d": 39}
         for tf, count in expected.items():
             info = self.cat.get_dataset_info(tf, inspect_metadata=False)
             self.assertEqual(info.actual_files, count)
 
     def test_nine_symbols(self) -> None:
         self.assertEqual(len(config.ALLOWED_SYMBOLS), 9)
+        self.assertEqual(len(config.CANONICAL_1M_SYMBOLS), 13)
+        self.assertEqual(config.symbols_for_timeframe("5m"), config.CANONICAL_1M_SYMBOLS)
+        self.assertEqual(config.symbols_for_timeframe("1m"), config.CANONICAL_1M_SYMBOLS)
         info = self.cat.get_dataset_info("5m", inspect_metadata=False)
-        self.assertEqual(len(info.symbols), 9)
+        self.assertEqual(len(info.symbols), 13)
 
     def test_monthly_versus_yearly_routing(self) -> None:
         monthly = self.cat.resolve_partitions(
@@ -84,9 +87,15 @@ class TestCatalog(unittest.TestCase):
             self.assertIn("1h", str(ctx.exception))
 
     def test_unexpected_symbol_rejection(self) -> None:
+        resolved = self.cat.resolve_partitions(
+            "SOLUSDT", "5m",
+            datetime(2026, 8, 10, tzinfo=UTC),
+            datetime(2026, 8, 11, tzinfo=UTC),
+        )
+        self.assertEqual(len(resolved), 1)
         with self.assertRaises(UnsupportedSymbolError):
             self.cat.resolve_partitions(
-                "SOLUSDT", "5m",
+                "FOOUSDT", "5m",
                 datetime(2026, 8, 10, tzinfo=UTC),
                 datetime(2026, 8, 11, tzinfo=UTC),
             )

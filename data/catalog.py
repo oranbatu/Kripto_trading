@@ -59,9 +59,9 @@ class DatasetInfo:
 
 
 def require_symbol(symbol: str) -> str:
-    if not isinstance(symbol, str) or symbol not in config.ALLOWED_SYMBOLS:
+    if not isinstance(symbol, str) or symbol not in config.CANONICAL_1M_SYMBOLS:
         raise UnsupportedSymbolError(
-            f"Unsupported symbol {symbol!r}. Allowed: {', '.join(config.ALLOWED_SYMBOLS)}"
+            f"Unsupported symbol {symbol!r}. Allowed: {', '.join(config.CANONICAL_1M_SYMBOLS)}"
         )
     return symbol
 
@@ -107,7 +107,7 @@ def expected_partition_keys(timeframe: str) -> list[tuple[str, int, int | None]]
         last = spec.last_open_utc
         year, month = start.year, start.month
         while (year, month) <= (last.year, last.month):
-            for symbol in config.ALLOWED_SYMBOLS:
+            for symbol in config.symbols_for_timeframe(timeframe):
                 keys.append((symbol, year, month))
             if month == 12:
                 year, month = year + 1, 1
@@ -115,7 +115,7 @@ def expected_partition_keys(timeframe: str) -> list[tuple[str, int, int | None]]
                 month += 1
     else:
         for year in range(spec.first_open_utc.year, spec.last_open_utc.year + 1):
-            for symbol in config.ALLOWED_SYMBOLS:
+            for symbol in config.symbols_for_timeframe(timeframe):
                 keys.append((symbol, year, None))
     return keys
 
@@ -242,7 +242,7 @@ class DataCatalog:
                 extra.append(rel)
                 continue
             symbol, year, month = parsed
-            if symbol not in config.ALLOWED_SYMBOLS:
+            if symbol not in config.symbols_for_timeframe(timeframe):
                 unexpected_symbols.add(symbol)
                 extra.append(rel)
                 continue
